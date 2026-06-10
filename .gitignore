@@ -1,0 +1,25 @@
+# Compiled binaries and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Test binaries, coverage, and profiling output
+*.test
+*.out
+coverage.*
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Legacy dependency vendoring
+/vendor/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
