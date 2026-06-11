@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  timeout: 120s
+  tests: false
+
+linters:
+  enable:
+    - bodyclose
+    - dupl
+    - errcheck
+    - goconst
+    - gochecknoglobals
+    - gochecknoinits
+    - gocritic
+    - gocyclo
+    - godox
+    - gosec
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - nolintlint
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: false
+    goimports:
+      local-prefixes:
+        - gopkg.in/launchdarkly
+        - github.com/launchdarkly
+
+issues:
+  max-same-issues: 1000

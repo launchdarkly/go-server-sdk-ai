@@ -1,72 +1,80 @@
-# go-server-sdk-ai
+# LaunchDarkly Server-side AI SDK for Go
 
-LaunchDarkly Server-side AI SDK for Go.
+[![Actions Status](https://github.com/launchdarkly/go-server-sdk-ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/launchdarkly/go-server-sdk-ai/actions/workflows/ci.yml)
 
-> **Pre-launch:** no SDK implementation exists here yet. The goal is feature parity with
-> [`python-server-sdk-ai`](https://github.com/launchdarkly/python-server-sdk-ai) and
-> [`@launchdarkly/server-sdk-ai`](https://github.com/launchdarkly/js-core/tree/main/packages/sdk/server-ai).
-> Tracking issue: [AIC-2701](https://launchdarkly.atlassian.net/browse/AIC-2701).
+> [!CAUTION]
+> This AI SDK is in pre-release and not subject to backwards compatibility guarantees. The API may change based on feedback.
+>
+> Pin to a specific minor version and review the [release notes](https://github.com/launchdarkly/go-server-sdk-ai/releases) before upgrading.
+>
+> Active feature development is ongoing in the [Python][python-ai-sdk] and [Node.js][node-ai-sdk] AI SDKs, so this SDK will receive new features at a slower pace. Refer to those for the latest capabilities.
 
-## Overview
+[python-ai-sdk]: https://github.com/launchdarkly/python-server-sdk-ai
+[node-ai-sdk]: https://github.com/launchdarkly/js-core/tree/main/packages/sdk/server-ai
 
-Builds on the base [`go-server-sdk`](https://github.com/launchdarkly/go-server-sdk) to manage
-AI model configuration (model, provider, prompt messages) via LaunchDarkly AI Configs,
-interpolate prompt variables, and report generation metrics (tokens, latency, success/error,
-feedback) back to LaunchDarkly.
+## LaunchDarkly overview
 
-## Metric event contract
+[LaunchDarkly](https://www.launchdarkly.com) is a feature management platform that serves trillions of feature flags daily to help teams build better software, faster. [Get started](https://docs.launchdarkly.com/home/getting-started) using LaunchDarkly today!
 
-The dashboard reads a fixed set of metric event keys sent via `LDClient.Track`. **These key
-strings must match the other SDKs exactly** or the metrics silently fail to register:
+[![Twitter Follow](https://img.shields.io/twitter/follow/launchdarkly.svg?style=social&label=Follow&maxAge=2592000)](https://twitter.com/intent/follow?screen_name=launchdarkly)
 
-- `$ld:ai:duration:total`
-- `$ld:ai:tokens:total`, `:input`, `:output`, `:ttf`
-- `$ld:ai:generation:success`, `:error`
-- `$ld:ai:feedback:user:positive`, `:negative`
-- Dynamic judge eval-score keys (one per metric)
-- Config-usage events (emitted by both Python and Node): `$ld:ai:config:function:single` /
-  `:createChat`, `$ld:ai:agent:function:single` / `:multiple`, `$ld:ai:judge:function:single` /
-  `:createJudge`
+## Getting started
 
-Metadata differs by event class:
-- **Metric events** carry `variationKey`, `configKey`, `version`, `modelName`, `providerName`
-  (+ `judgeConfigKey` on judge events). Node also sends `aiSdkName` / `aiSdkVersion`; Python
-  does not — Go should follow Node and include them.
-- **Config-usage events** instead pass just the config key (or the agent count for `:multiple`)
-  as the event data, with value `1` (count for `:multiple`).
+This module provides the `ldai` package, built on top of the base [`go-server-sdk`](https://github.com/launchdarkly/go-server-sdk). It resolves AI model configuration (model, provider, prompt messages) from LaunchDarkly AI Configs, interpolates prompt templates, and reports generation metrics (tokens, latency, success/error, feedback) back to LaunchDarkly.
 
-## TODO: path to launch
+Import the base Server SDK and this AI SDK:
 
-"Launch" = Tier 1 + Tier 2 (a usable SDK whose metrics light up the dashboard).
-Tier 3 is post-launch / scope decisions.
+```go
+import (
+	ld "github.com/launchdarkly/go-server-sdk/v7"
+	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
+	"github.com/launchdarkly/go-server-sdk-ai/ldai"
+)
+```
 
-### Scaffold
-- [ ] `go.mod` (module `github.com/launchdarkly/go-server-sdk-ai`), depend on `go-server-sdk/v7`
-- [ ] Package layout (`ldai/` core; providers as separate sub-modules with their own `go.mod`)
-- [ ] Repo furniture: usage docs, `CONTRIBUTING`, `LICENSE`, `.golangci.yml`, CI
-- [ ] Branch protection on `main` (Terraform follow-up in `launchdarkly/terraform`)
+Configure the base LaunchDarkly Server SDK:
 
-### Tier 1 — usable parity (unblocks dashboard metrics)
-- [ ] Data model types: `LDMessage`, model/provider config, default + resolved config variants
-- [ ] Client init on top of the base `LDClient`
-- [ ] Config retrieval: completion, agent (+ batch), judge — parse `_ldMeta` (enabled / version / mode)
-- [ ] Mustache templating with auto-injected `ldctx`, HTML-escaping disabled
-- [ ] Tracker: all `Track*` methods using the **exact** event keys above
-- [ ] Token-usage normalization (OpenAI + Bedrock shapes) → common `TokenUsage{Total, Input, Output}`
-- [ ] Disabled-config behavior (no tracker; chat/judge constructors return nil)
+```go
+sdkClient, _ := ld.MakeClient("your-sdk-key", 5*time.Second)
+```
 
-### Tier 2 — higher-level helpers
-- [ ] Chat (invoke, message history, accessors)
-- [ ] Judge (evaluate, sampling rate, structured-output schema)
-- [ ] Provider interface (`InvokeModel`, `InvokeStructuredModel`) + selection factory
-- [ ] OpenAI provider (separate sub-module)
+Instantiate the AI client, passing in the base Server SDK:
 
-### Tier 3 — post-launch / scope decisions
-- [ ] LangChain provider (LangChain-Go is less mature — decide whether to ship)
-- [ ] Streaming metrics (Go-idiomatic via channels)
-- [ ] Agent graphs (currently Python-only)
+```go
+aiClient, err := ldai.NewClient(sdkClient)
+```
 
-**Out of scope:** Vercel AI provider (JS-only).
+Fetch a model configuration for a specific LaunchDarkly context:
 
-> Implementation notes (concurrency via `context.Context`/errgroup, functional options,
-> sub-module providers mirroring the redis/dynamodb/consul split) are in AIC-2701.
+```go
+// The default value 'ldai.Disabled()' is returned if LaunchDarkly is unavailable or the
+// config cannot be fetched. To customize the default value, use ldai.NewConfig().
+config := aiClient.CompletionConfig("your-config-key", ldcontext.New("user-key"), ldai.Disabled(), nil)
+
+// Access the resolved configuration via methods on config (config.Messages(),
+// config.ModelName(), config.ProviderName(), and so on). To generate analytic events for
+// usage of the model config, obtain a tracker by calling config.CreateTracker().
+tracker := config.CreateTracker()
+```
+
+## Learn more
+
+Read our [documentation](https://docs.launchdarkly.com) for in-depth instructions on configuring and using LaunchDarkly. You can also head straight to the [complete reference guide for this SDK](https://docs.launchdarkly.com/sdk/ai/go).
+
+## Contributing
+
+We encourage pull requests and other contributions from the community. Check out our [contributing guidelines](CONTRIBUTING.md) for instructions on how to contribute to this library.
+
+## About LaunchDarkly
+
+* LaunchDarkly is a continuous delivery platform that provides feature flags as a service and allows developers to iterate quickly and safely. We allow you to easily flag your features and manage them from the LaunchDarkly dashboard. With LaunchDarkly, you can:
+    * Roll out a new feature to a subset of your users (like a group of users who opt-in to a beta tester group), gathering feedback and bug reports from real-world use cases.
+    * Gradually roll out a feature to an increasing percentage of users, and track the effect that the feature has on key metrics (for instance, how likely is a user to complete a purchase if they have feature A versus feature B?).
+    * Turn off a feature that you realize is causing performance problems in production, without needing to re-deploy, or even restart the application with a changed configuration file.
+    * Grant access to certain features based on user attributes, like payment plan (eg: users on the 'gold' plan get access to more features than users in the 'silver' plan). Disable parts of your application to facilitate maintenance, without taking everything offline.
+* LaunchDarkly provides feature flag SDKs for a wide variety of languages and technologies. Read [our documentation](https://docs.launchdarkly.com/sdk) for a complete list.
+* Explore LaunchDarkly
+    * [launchdarkly.com](https://www.launchdarkly.com/ "LaunchDarkly Main Website") for more information
+    * [docs.launchdarkly.com](https://docs.launchdarkly.com/ "LaunchDarkly Documentation") for our documentation and SDK reference guides
+    * [apidocs.launchdarkly.com](https://apidocs.launchdarkly.com/ "LaunchDarkly API Documentation") for our API documentation
+    * [blog.launchdarkly.com](https://blog.launchdarkly.com/ "LaunchDarkly Blog Documentation") for the latest product updates
