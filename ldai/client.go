@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 
@@ -18,8 +19,9 @@ import (
 const ldContextVariable = "ldctx"
 
 // JudgePlaceholderMessageHistory and JudgePlaceholderResponseToEvaluate are the literal placeholder
-// strings shared between JudgeConfig (pass 1) and Judge.buildMessages (pass 2). Both must use the
-// same values or substitution silently fails.
+// strings used by legacy judge configs to mark where the evaluated conversation should be inserted.
+// JudgeConfig preserves them through interpolation so the messages containing them can be detected
+// and removed; see StripLegacyJudgeMessages.
 const (
 	JudgePlaceholderMessageHistory     = "{{message_history}}"
 	JudgePlaceholderResponseToEvaluate = "{{response_to_evaluate}}"
@@ -102,7 +104,7 @@ func (c *Client) CompletionConfig(
 ) Config {
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageCompletionConfig, context, 1, data)
-	return c.evaluateConfig(key, context, defaultValue, variables)
+	return c.evaluateConfig(key, context, defaultValue, variables, nil)
 }
 
 // CreateTracker reconstructs a Tracker from a resumption token and the given context.
@@ -111,9 +113,16 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 	return TrackerFromResumptionToken(token, c.sdk, context)
 }
 
+// messageTransform is applied to a Config's messages before its tracker factory is created, so
+// that trackers and the returned Config always observe the same message list.
+type messageTransform func([]datamodel.Message) []datamodel.Message
+
 // returnDefault sets a tracker factory on a copy of def (so CreateTracker always works) and
 // returns the resulting Config. Used for all error-path returns in evaluateConfig.
-func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
+func (c *Client) returnDefault(key string, context ldcontext.Context, def Config, transform messageTransform) Config {
+	if transform != nil {
+		def.c.Messages = transform(def.c.Messages)
+	}
 	def.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger)
 	}
@@ -122,30 +131,33 @@ func (c *Client) returnDefault(key string, context ldcontext.Context, def Config
 
 // evaluateConfig fetches and interpolates an AI Config without emitting any metric.
 // Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
+// If transform is non-nil it is applied to the resulting messages (including on default-value
+// paths) before the tracker factory is created.
 func (c *Client) evaluateConfig(
 	key string,
 	context ldcontext.Context,
 	defaultValue Config,
 	variables map[string]interface{},
+	transform messageTransform,
 ) Config {
 	result, err := c.sdk.JSONVariation(key, context, defaultValue.AsLdValue())
 	if err != nil {
 		// The evaluation failed (e.g. flag not found, client not initialized), so the SDK returned the
 		// default value. Return it as-is: interpolation is not applied to the default value's messages.
-		return c.returnDefault(key, context, defaultValue)
+		return c.returnDefault(key, context, defaultValue, transform)
 	}
 
 	// The spec requires the config to at least be an object (although all properties are optional, so it may be an
 	// empty object.)
 	if result.Type() != ldvalue.ObjectType {
 		c.logConfigWarning(key, "unmarshalling failed, expected JSON object but got %s", result.Type().String())
-		return c.returnDefault(key, context, defaultValue)
+		return c.returnDefault(key, context, defaultValue, transform)
 	}
 
 	var parsed datamodel.Config
 	if err := json.Unmarshal(result.AsRaw(), &parsed); err != nil {
 		c.logConfigWarning(key, "unmarshalling failed: %v", err)
-		return c.returnDefault(key, context, defaultValue)
+		return c.returnDefault(key, context, defaultValue, transform)
 	}
 
 	mergedVariables := map[string]interface{}{
@@ -183,7 +195,7 @@ func (c *Client) evaluateConfig(
 			c.logConfigWarning(key,
 				"malformed message at index %d: %v", i, err,
 			)
-			return c.returnDefault(key, context, defaultValue)
+			return c.returnDefault(key, context, defaultValue, transform)
 		}
 		builder.WithMessage(content, msg.Role)
 	}
@@ -191,6 +203,9 @@ func (c *Client) evaluateConfig(
 	cfg := builder.Build()
 	cfg.c.Meta.VariationKey = parsed.Meta.VariationKey
 	cfg.c.Meta.Version = parsed.Meta.Version
+	if transform != nil {
+		cfg.c.Messages = transform(cfg.c.Messages)
+	}
 
 	cfg.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
@@ -260,9 +275,11 @@ func interpolateTemplate(template string, variables map[string]interface{}) (str
 	return m.RenderString(variables)
 }
 
-// JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved
-// variables message_history and response_to_evaluate are preserved as literal placeholders for
-// substitution by Judge.buildMessages during evaluation.
+// JudgeConfig retrieves a Judge AI Config and interpolates its message templates. Legacy judge
+// configs contain template messages with the reserved {{message_history}} and
+// {{response_to_evaluate}} placeholders; those messages are stripped from the returned config.
+// New-style judge configs omit them entirely: the judge supplies the evaluated conversation as
+// part of its evaluation input instead.
 //
 // To send analytic events to LaunchDarkly, call CreateTracker on the returned Config to obtain a Tracker.
 func (c *Client) JudgeConfig(
@@ -274,7 +291,6 @@ func (c *Client) JudgeConfig(
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
 
-	// Extend variables with reserved judge placeholders
 	extendedVariables := make(map[string]interface{})
 	for k, v := range variables {
 		// Warn if user tries to override reserved variables
@@ -285,10 +301,31 @@ func (c *Client) JudgeConfig(
 		extendedVariables[k] = v
 	}
 
-	// Inject reserved variables as literal placeholder strings
-	// These will be preserved through the first interpolation and resolved during Judge.Evaluate()
+	// Re-inject the reserved variables as their literal placeholders so they survive Mustache
+	// interpolation in evaluateConfig. Without this, legacy templates like {{message_history}}
+	// get rendered to empty strings and StripLegacyJudgeMessages below cannot detect them.
 	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
 	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
 
-	return c.evaluateConfig(key, context, defaultValue, extendedVariables)
+	// The strip runs inside evaluateConfig, before the tracker factory captures the config, so
+	// trackers observe the same stripped messages as the returned Config.
+	return c.evaluateConfig(key, context, defaultValue, extendedVariables, StripLegacyJudgeMessages)
+}
+
+// StripLegacyJudgeMessages returns messages with legacy judge template messages removed: any
+// non-system message whose content contains the literal JudgePlaceholderMessageHistory or
+// JudgePlaceholderResponseToEvaluate placeholder. Older judge configs used these messages to mark
+// where the SDK should insert the evaluated conversation; new configs omit them and rely on the
+// evaluation input built by the judge.
+func StripLegacyJudgeMessages(messages []datamodel.Message) []datamodel.Message {
+	result := make([]datamodel.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role != datamodel.System &&
+			(strings.Contains(msg.Content, JudgePlaceholderMessageHistory) ||
+				strings.Contains(msg.Content, JudgePlaceholderResponseToEvaluate)) {
+			continue
+		}
+		result = append(result, msg)
+	}
+	return result
 }

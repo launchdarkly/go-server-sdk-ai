@@ -801,17 +801,20 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 	assert.Equal(t, "judge2", retrieved2.Judges[1].Key)
 }
 
-// TestJudgeConfig_PreservesReservedPlaceholders verifies that JudgeConfig injects reserved variables
-// so that {{message_history}} and {{response_to_evaluate}} are preserved for the second interpolation
-// pass during Judge.Evaluate(). Without this, Config's first Mustache pass would render them as empty.
-func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
+// TestJudgeConfig_StripsLegacyTemplateMessages verifies that JudgeConfig removes legacy judge
+// template messages (containing {{message_history}} or {{response_to_evaluate}}) from the returned
+// config. The reserved variables are injected during interpolation so the placeholders survive the
+// Mustache pass — otherwise they would render as empty strings and the legacy messages could not
+// be detected. System messages and placeholder-free messages are kept (and still interpolated).
+func TestJudgeConfig_StripsLegacyTemplateMessages(t *testing.T) {
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "1", "enabled": true},
 		"mode": "judge",
 		"evaluationMetricKey": "toxicity",
 		"messages": [
-			{"content": "You are a judge.", "role": "system"},
-			{"content": "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", "role": "user"}
+			{"content": "You are a {{tone}} judge.", "role": "system"},
+			{"content": "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", "role": "user"},
+			{"content": "Score from 0 to 1.", "role": "user"}
 		]
 	}`)
 
@@ -819,14 +822,93 @@ func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(), nil)
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(),
+		map[string]interface{}{"tone": "strict"})
 
 	msgs := cfg.Messages()
-	require.Len(t, msgs, 2)
-	assert.Equal(t, "You are a judge.", msgs[0].Content)
-	assert.Contains(t, msgs[1].Content, "{{message_history}}", "JudgeConfig must preserve placeholder for second interpolation")
-	assert.Contains(t, msgs[1].Content, "{{response_to_evaluate}}", "JudgeConfig must preserve placeholder for second interpolation")
-	assert.Equal(t, "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", msgs[1].Content)
+	require.Len(t, msgs, 2, "legacy template message must be stripped")
+	assert.Equal(t, "You are a strict judge.", msgs[0].Content)
+	assert.Equal(t, "Score from 0 to 1.", msgs[1].Content)
+	for _, msg := range msgs {
+		assert.NotContains(t, msg.Content, "{{message_history}}")
+		assert.NotContains(t, msg.Content, "{{response_to_evaluate}}")
+	}
+}
+
+// TestJudgeConfig_TrackerSeesStrippedMessages is a regression test: the tracker factory must
+// capture the config AFTER legacy-message stripping, so the *Config handed to TrackRequest's task
+// callback agrees with the returned config's Messages().
+func TestJudgeConfig_TrackerSeesStrippedMessages(t *testing.T) {
+	json := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"mode": "judge",
+		"evaluationMetricKey": "toxicity",
+		"messages": [
+			{"content": "Legacy: {{message_history}}", "role": "user"},
+			{"content": "Keep me.", "role": "user"}
+		]
+	}`)
+
+	client, err := NewClient(newMockSDK(json, nil))
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(), nil)
+	tracker := cfg.CreateTracker()
+	require.NotNil(t, tracker)
+
+	var taskMessages []datamodel.Message
+	_, _ = tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
+		taskMessages = c.Messages()
+		return ProviderResponse{}, nil
+	})
+
+	require.Len(t, taskMessages, 1, "tracker's config must have legacy messages stripped")
+	assert.Equal(t, "Keep me.", taskMessages[0].Content)
+	assert.Equal(t, cfg.Messages(), taskMessages, "returned config and tracker config must agree")
+}
+
+// TestJudgeConfig_DefaultPathAlsoStripped verifies that legacy messages are stripped even when the
+// evaluation fails and the default value is returned.
+func TestJudgeConfig_DefaultPathAlsoStripped(t *testing.T) {
+	client, err := NewClient(newMockSDK(nil, errors.New("client is offline")))
+	require.NoError(t, err)
+
+	defaultVal := NewConfig().Enable().
+		WithMessage("Legacy: {{message_history}}", datamodel.User).
+		WithMessage("Keep me.", datamodel.User).
+		Build()
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), defaultVal, nil)
+
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "Keep me.", msgs[0].Content)
+}
+
+// TestJudgeConfig_ReservedVariablesIgnored verifies that user-supplied values for the reserved
+// judge variables are ignored (with a warning) rather than interpolated into legacy templates.
+func TestJudgeConfig_ReservedVariablesIgnored(t *testing.T) {
+	json := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"mode": "judge",
+		"evaluationMetricKey": "toxicity",
+		"messages": [
+			{"content": "Legacy: {{message_history}}", "role": "user"},
+			{"content": "Keep me.", "role": "user"}
+		]
+	}`)
+
+	mockSDK := newMockSDK(json, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(),
+		map[string]interface{}{"message_history": "user-supplied"})
+
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1, "legacy template message must be stripped, not interpolated with user value")
+	assert.Equal(t, "Keep me.", msgs[0].Content)
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "reserved by judge")
 }
 
 // TestConfig_WithoutReservedVarsWipesJudgePlaceholders documents that Config (without reserved vars)

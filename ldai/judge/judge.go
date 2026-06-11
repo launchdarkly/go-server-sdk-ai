@@ -3,6 +3,7 @@ package judge
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 
 // Config defines the subset of an AI Config that a Judge requires. This is satisfied by *ldai.Config.
 type Config interface {
+	Enabled() bool
 	Messages() []datamodel.Message
 	ModelParam(key string) (ldvalue.Value, bool)
 	CustomModelParam(key string) (ldvalue.Value, bool)
@@ -55,10 +57,15 @@ type Judge struct {
 	metricKey      string
 	judgeConfigKey string
 	logger         interfaces.LDLoggers
+	// messages and schema are snapshotted at construction: the config's messages with legacy
+	// placeholder template messages stripped, and the fixed evaluation schema.
+	messages []datamodel.Message
+	schema   map[string]interface{}
 }
 
 // New creates a Judge from a judge AI Config, a tracker for reporting metrics, and a model provider.
-// The config, tracker, and provider must not be nil, and the config must define an evaluation metric key.
+// The config, tracker, and provider must not be nil; the config must be enabled and define an
+// evaluation metric key. The config's messages are snapshotted at construction.
 func New(
 	config Config,
 	tracker Tracker,
@@ -75,6 +82,9 @@ func New(
 	if provider == nil {
 		return nil, fmt.Errorf("provider must not be nil")
 	}
+	if !config.Enabled() {
+		return nil, fmt.Errorf("judge config %q is disabled", configKey)
+	}
 
 	metricKey, err := getMetricKey(config, logger, configKey)
 	if err != nil {
@@ -88,26 +98,23 @@ func New(
 		metricKey:      metricKey,
 		judgeConfigKey: configKey,
 		logger:         logger,
+		messages:       ldai.StripLegacyJudgeMessages(config.Messages()),
+		schema:         buildSchema(),
 	}, nil
 }
 
 // Evaluate runs the judge against the given input (e.g., the prompt or message history) and output
 // (the response to evaluate). The evaluation is sampled at the given rate (0.0-1.0); a nil response
-// with a nil error indicates the evaluation was skipped due to sampling or an empty judge config.
+// with a nil error indicates the evaluation was skipped due to sampling.
 func (j *Judge) Evaluate(input, output string, samplingRate float64) (*datamodel.JudgeResponse, error) {
-	if len(j.config.Messages()) == 0 {
-		return nil, nil
-	}
-
 	//nolint:gosec // sampling does not require cryptographic randomness
 	if samplingRate < 1.0 && rand.Float64() > samplingRate {
 		return nil, nil
 	}
 
 	messages := j.buildMessages(input, output)
-	schema := buildSchema(j.metricKey)
 
-	response, err := j.provider.InvokeStructuredModel(messages, schema)
+	response, err := j.provider.InvokeStructuredModel(messages, j.schema)
 	if err != nil {
 		return j.failureResponse(err.Error()), nil
 	}
@@ -123,8 +130,9 @@ func (j *Judge) Evaluate(input, output string, samplingRate float64) (*datamodel
 	return result, nil
 }
 
-// EvaluateMessages is a convenience form of Evaluate that joins the given messages' contents into
-// a single input string.
+// EvaluateMessages is a convenience form of Evaluate that renders the given messages as the
+// evaluation input. Each message is rendered as "<role>: <content>" and joined with newlines, so
+// the judge model can distinguish speakers in the message history.
 func (j *Judge) EvaluateMessages(
 	messages []datamodel.Message,
 	response string,
@@ -132,9 +140,9 @@ func (j *Judge) EvaluateMessages(
 ) (*datamodel.JudgeResponse, error) {
 	parts := make([]string, len(messages))
 	for i, msg := range messages {
-		parts[i] = msg.Content
+		parts[i] = string(msg.Role) + ": " + msg.Content
 	}
-	input := strings.Join(parts, "\r\n")
+	input := strings.Join(parts, "\n")
 	return j.Evaluate(input, response, samplingRate)
 }
 
@@ -153,22 +161,24 @@ func (j *Judge) GetProvider() Provider {
 	return j.provider
 }
 
+// buildMessages constructs the messages sent to the provider: the judge's snapshotted config
+// messages (with legacy placeholder template messages stripped) followed by a user message
+// containing the evaluation input. The evaluated conversation is never substituted into config
+// messages, so model-generated or user-controlled content cannot alter the judge's prompt
+// structure.
 func (j *Judge) buildMessages(input, output string) []datamodel.Message {
-	// Use string replacement to prevent context attributes like {{=[ ]=}}) from
-	// influencing judge template parsing.
-	replacer := strings.NewReplacer(
-		ldai.JudgePlaceholderMessageHistory, input,
-		ldai.JudgePlaceholderResponseToEvaluate, output,
-	)
+	messages := make([]datamodel.Message, len(j.messages), len(j.messages)+1)
+	copy(messages, j.messages)
+	return append(messages, datamodel.Message{
+		Role:    datamodel.User,
+		Content: buildEvaluationInput(input, output),
+	})
+}
 
-	messages := j.config.Messages()
-	result := make([]datamodel.Message, len(messages))
-
-	for i, msg := range messages {
-		result[i] = datamodel.Message{Content: replacer.Replace(msg.Content), Role: msg.Role}
-	}
-
-	return result
+// buildEvaluationInput combines the message history and the response under evaluation into the
+// fixed plain-text format shared by the LaunchDarkly AI SDKs.
+func buildEvaluationInput(input, output string) string {
+	return "MESSAGE HISTORY:\n" + input + "\n\nRESPONSE TO EVALUATE:\n" + output
 }
 
 // failureResponse builds the JudgeResponse shape shared by all evaluation failure paths.
@@ -182,42 +192,44 @@ func (j *Judge) failureResponse(errMsg string) *datamodel.JudgeResponse {
 }
 
 // toFloat64 coerces the numeric types a Provider implementation may realistically produce for a
-// score (plain JSON decoding, json.Decoder.UseNumber, or a hand-built map).
+// score (plain JSON decoding, json.Decoder.UseNumber, or a hand-built map). NaN and infinities
+// are rejected: range checks cannot catch NaN, and neither survives JSON encoding.
 func toFloat64(v interface{}) (float64, bool) {
+	var f float64
 	switch n := v.(type) {
 	case float64:
-		return n, true
+		f = n
 	case float32:
-		return float64(n), true
+		f = float64(n)
 	case int:
-		return float64(n), true
+		f = float64(n)
 	case int64:
-		return float64(n), true
+		f = float64(n)
 	case json.Number:
-		f, err := n.Float64()
-		return f, err == nil
+		parsed, err := n.Float64()
+		if err != nil {
+			return 0, false
+		}
+		f = parsed
 	default:
 		return 0, false
 	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return f, true
 }
 
+// parseResponse parses the structured evaluation response, expecting top-level score and
+// reasoning fields. The parsed result is keyed by the judge's evaluation metric key so that
+// tracked eval-score events use the configured metric key.
 func (j *Judge) parseResponse(data map[string]interface{}) *datamodel.JudgeResponse {
-	evaluations, ok := data["evaluations"].(map[string]interface{})
-	if !ok {
-		return j.failureResponse("missing evaluations object")
-	}
-
-	evalData, ok := evaluations[j.metricKey].(map[string]interface{})
-	if !ok {
-		return j.failureResponse(fmt.Sprintf("missing evaluation for %s", j.metricKey))
-	}
-
-	score, ok := toFloat64(evalData["score"])
+	score, ok := toFloat64(data["score"])
 	if !ok || score < 0 || score > 1 {
 		return j.failureResponse("invalid score")
 	}
 
-	reasoning, ok := evalData["reasoning"].(string)
+	reasoning, ok := data["reasoning"].(string)
 	if !ok {
 		return j.failureResponse("invalid reasoning")
 	}

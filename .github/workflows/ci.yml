@@ -38,6 +38,7 @@ jobs:
           go-version: '1.24'
       - name: golangci-lint
         # v8+ is required for golangci-lint v2 (which the version: "2" config format needs).
+        # Pinned so lint behavior doesn't drift between runs; bump deliberately.
         uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.12.2

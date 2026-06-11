@@ -3,6 +3,7 @@ package judge
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
@@ -13,11 +14,16 @@ import (
 )
 
 type mockConfig struct {
+	disabled             bool
 	messages             []datamodel.Message
 	modelParam           map[string]ldvalue.Value
 	customParam          map[string]ldvalue.Value
 	evaluationMetricKey  string
 	evaluationMetricKeys []string
+}
+
+func (m *mockConfig) Enabled() bool {
+	return !m.disabled
 }
 
 func (m *mockConfig) Messages() []datamodel.Message {
@@ -68,6 +74,14 @@ func (m *mockProvider) InvokeStructuredModel(messages []datamodel.Message, schem
 	return m.response, m.err
 }
 
+// evaluationContent builds a structured response body in the top-level {score, reasoning} shape.
+func evaluationContent(score interface{}, reasoning interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"score":     score,
+		"reasoning": reasoning,
+	}
+}
+
 func TestNew(t *testing.T) {
 	config := &mockConfig{
 		evaluationMetricKey: "$ld:ai:judge:relevance",
@@ -93,6 +107,18 @@ func TestNew_MissingMetricKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing evaluationMetricKey")
 }
 
+func TestNew_DisabledConfig(t *testing.T) {
+	config := &mockConfig{
+		disabled:            true,
+		evaluationMetricKey: "$ld:ai:judge:relevance",
+	}
+
+	judge, err := New(config, &mockTracker{}, &mockProvider{}, "test-judge", nil)
+	assert.Error(t, err)
+	assert.Nil(t, judge)
+	assert.Contains(t, err.Error(), "disabled")
+}
+
 func TestNew_NilInputs(t *testing.T) {
 	config := &mockConfig{evaluationMetricKey: "test"}
 	tracker := &mockTracker{}
@@ -113,22 +139,13 @@ func TestEvaluate_Success(t *testing.T) {
 		evaluationMetricKey: "$ld:ai:judge:relevance",
 		messages: []datamodel.Message{
 			{Role: datamodel.System, Content: "Evaluate this"},
-			{Role: datamodel.User, Content: "Input: {{message_history}}"},
-			{Role: datamodel.User, Content: "Output: {{response_to_evaluate}}"},
 		},
 	}
 	tracker := &mockTracker{}
 	provider := &mockProvider{
 		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.85,
-						"reasoning": "Highly relevant",
-					},
-				},
-			},
-			Usage: ldai.TokenUsage{Total: 100, Input: 60, Output: 40},
+			Content: evaluationContent(0.85, "Highly relevant"),
+			Usage:   ldai.TokenUsage{Total: 100, Input: 60, Output: 40},
 		},
 	}
 
@@ -150,10 +167,47 @@ func TestEvaluate_Success(t *testing.T) {
 	// The judge's tracker is only used for usage/duration metrics
 	assert.Len(t, tracker.judgeResponses, 0, "Judge should not track responses internally")
 
+	// The provider receives the config messages followed by the evaluation input.
 	require.Len(t, provider.calls, 1)
+	require.Len(t, provider.calls[0], 2)
 	assert.Equal(t, "Evaluate this", provider.calls[0][0].Content)
-	assert.Equal(t, "Input: test input", provider.calls[0][1].Content)
-	assert.Equal(t, "Output: test output", provider.calls[0][2].Content)
+	assert.Equal(t, datamodel.User, provider.calls[0][1].Role)
+	assert.Equal(t, "MESSAGE HISTORY:\ntest input\n\nRESPONSE TO EVALUATE:\ntest output",
+		provider.calls[0][1].Content)
+}
+
+// TestEvaluate_StripsLegacyMessages verifies that legacy judge template messages (containing the
+// reserved placeholders) are removed before invoking the provider; only system messages and
+// placeholder-free messages survive, followed by the evaluation input.
+func TestEvaluate_StripsLegacyMessages(t *testing.T) {
+	config := &mockConfig{
+		evaluationMetricKey: "$ld:ai:judge:test",
+		messages: []datamodel.Message{
+			{Role: datamodel.System, Content: "You are a judge"},
+			{Role: datamodel.User, Content: "Input: {{message_history}}"},
+			{Role: datamodel.User, Content: "Output: {{response_to_evaluate}}"},
+		},
+	}
+
+	tracker := &mockTracker{}
+	provider := &mockProvider{
+		response: StructuredResponse{Content: evaluationContent(0.9, "Good response")},
+	}
+
+	judge, err := New(config, tracker, provider, "test-judge", nil)
+	require.NoError(t, err)
+
+	result, err := judge.Evaluate("What is AI?", "AI is artificial intelligence", 1.0)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Len(t, provider.calls, 1)
+	messages := provider.calls[0]
+	require.Len(t, messages, 2, "legacy placeholder messages must be stripped")
+
+	assert.Equal(t, "You are a judge", messages[0].Content)
+	assert.Equal(t, "MESSAGE HISTORY:\nWhat is AI?\n\nRESPONSE TO EVALUATE:\nAI is artificial intelligence",
+		messages[1].Content)
 }
 
 func TestEvaluate_NonFloat64Scores(t *testing.T) {
@@ -177,16 +231,7 @@ func TestEvaluate_NonFloat64Scores(t *testing.T) {
 				},
 			}
 			provider := &mockProvider{
-				response: StructuredResponse{
-					Content: map[string]interface{}{
-						"evaluations": map[string]interface{}{
-							"$ld:ai:judge:relevance": map[string]interface{}{
-								"score":     c.score,
-								"reasoning": "ok",
-							},
-						},
-					},
-				},
+				response: StructuredResponse{Content: evaluationContent(c.score, "ok")},
 			}
 
 			judge, err := New(config, &mockTracker{}, provider, "test-judge", nil)
@@ -209,16 +254,7 @@ func TestEvaluate_InvalidJSONNumberScore(t *testing.T) {
 		},
 	}
 	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     json.Number("abc"),
-						"reasoning": "ok",
-					},
-				},
-			},
-		},
+		response: StructuredResponse{Content: evaluationContent(json.Number("abc"), "ok")},
 	}
 
 	judge, err := New(config, &mockTracker{}, provider, "test-judge", nil)
@@ -231,20 +267,31 @@ func TestEvaluate_InvalidJSONNumberScore(t *testing.T) {
 	assert.Contains(t, result.Error, "invalid score")
 }
 
-func TestEvaluate_NoMessages(t *testing.T) {
+// TestEvaluate_EmptyConfigMessages verifies that a config without messages still evaluates: the
+// evaluation input alone is sent to the provider. (Matches the Python/Node SDKs, which no longer
+// require judge config messages.)
+func TestEvaluate_EmptyConfigMessages(t *testing.T) {
 	config := &mockConfig{
 		evaluationMetricKey: "$ld:ai:judge:relevance",
 		messages:            []datamodel.Message{},
 	}
 	tracker := &mockTracker{}
-	provider := &mockProvider{}
+	provider := &mockProvider{
+		response: StructuredResponse{Content: evaluationContent(0.5, "ok")},
+	}
 
 	judge, err := New(config, tracker, provider, "test-judge", nil)
 	require.NoError(t, err)
 
 	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.Nil(t, result)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+
+	require.Len(t, provider.calls, 1)
+	require.Len(t, provider.calls[0], 1)
+	assert.Equal(t, "MESSAGE HISTORY:\ninput\n\nRESPONSE TO EVALUATE:\noutput",
+		provider.calls[0][0].Content)
 }
 
 func TestEvaluate_Sampling(t *testing.T) {
@@ -289,51 +336,64 @@ func TestEvaluate_ProviderError(t *testing.T) {
 
 func TestEvaluate_InvalidResponse(t *testing.T) {
 	tests := []struct {
-		name     string
-		response map[string]interface{}
+		name          string
+		response      map[string]interface{}
+		expectedError string
 	}{
 		{
-			name:     "missing evaluations",
-			response: map[string]interface{}{},
+			name:          "empty response",
+			response:      map[string]interface{}{},
+			expectedError: "invalid score",
 		},
 		{
-			name: "missing metric key",
-			response: map[string]interface{}{
-				"evaluations": map[string]interface{}{},
-			},
+			name:          "missing score",
+			response:      map[string]interface{}{"reasoning": "test"},
+			expectedError: "invalid score",
 		},
 		{
-			name: "invalid score type",
-			response: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     "not a number",
-						"reasoning": "test",
-					},
-				},
-			},
+			name:          "null score",
+			response:      evaluationContent(nil, "test"),
+			expectedError: "invalid score",
 		},
 		{
-			name: "score out of range",
-			response: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     1.5,
-						"reasoning": "test",
-					},
-				},
-			},
+			name:          "invalid score type",
+			response:      evaluationContent("not a number", "test"),
+			expectedError: "invalid score",
 		},
 		{
-			name: "invalid reasoning type",
-			response: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.5,
-						"reasoning": 123,
-					},
-				},
-			},
+			name:          "score as numeric string",
+			response:      evaluationContent("0.5", "test"),
+			expectedError: "invalid score",
+		},
+		{
+			name:          "score greater than one",
+			response:      evaluationContent(1.5, "test"),
+			expectedError: "invalid score",
+		},
+		{
+			name:          "negative score",
+			response:      evaluationContent(-0.5, "test"),
+			expectedError: "invalid score",
+		},
+		{
+			name:          "NaN score",
+			response:      evaluationContent(math.NaN(), "test"),
+			expectedError: "invalid score",
+		},
+		{
+			name:          "infinite score",
+			response:      evaluationContent(math.Inf(1), "test"),
+			expectedError: "invalid score",
+		},
+		{
+			name:          "invalid reasoning type",
+			response:      evaluationContent(0.5, 123),
+			expectedError: "invalid reasoning",
+		},
+		{
+			name:          "missing reasoning",
+			response:      map[string]interface{}{"score": 0.5},
+			expectedError: "invalid reasoning",
 		},
 	}
 
@@ -355,7 +415,7 @@ func TestEvaluate_InvalidResponse(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, result)
 			assert.False(t, result.Success)
-			assert.NotEmpty(t, result.Error)
+			assert.Contains(t, result.Error, tt.expectedError)
 		})
 	}
 }
@@ -363,20 +423,11 @@ func TestEvaluate_InvalidResponse(t *testing.T) {
 func TestEvaluateMessages(t *testing.T) {
 	config := &mockConfig{
 		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "{{message_history}}"}},
+		messages:            []datamodel.Message{{Role: datamodel.System, Content: "You are a judge"}},
 	}
 	tracker := &mockTracker{}
 	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.9,
-						"reasoning": "Excellent",
-					},
-				},
-			},
-		},
+		response: StructuredResponse{Content: evaluationContent(0.9, "Excellent")},
 	}
 
 	judge, err := New(config, tracker, provider, "test-judge", nil)
@@ -392,8 +443,11 @@ func TestEvaluateMessages(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.True(t, result.Success)
 
+	// History is rendered as "<role>: <content>" lines so the judge can distinguish speakers.
 	require.Len(t, provider.calls, 1)
-	assert.Contains(t, provider.calls[0][0].Content, "Hello\r\nHi there")
+	require.Len(t, provider.calls[0], 2)
+	assert.Equal(t, "MESSAGE HISTORY:\nuser: Hello\nassistant: Hi there\n\nRESPONSE TO EVALUATE:\nresponse",
+		provider.calls[0][1].Content)
 }
 
 func TestGetMetricKey(t *testing.T) {
@@ -458,226 +512,26 @@ func TestGetMetricKey(t *testing.T) {
 	}
 }
 
+// TestBuildSchema verifies the fixed evaluation schema shape: top-level score and reasoning, both
+// required, with no metric-key-specific structure.
 func TestBuildSchema(t *testing.T) {
-	schema := buildSchema("$ld:ai:judge:relevance")
+	schema := buildSchema()
 
 	assert.Equal(t, "object", schema["type"])
-	assert.Contains(t, schema, "properties")
-	assert.Contains(t, schema, "required")
+	assert.Equal(t, []string{"score", "reasoning"}, schema["required"])
+	assert.Equal(t, false, schema["additionalProperties"])
 
 	props := schema["properties"].(map[string]interface{})
-	evals := props["evaluations"].(map[string]interface{})
-	evalProps := evals["properties"].(map[string]interface{})
+	require.Contains(t, props, "score")
+	require.Contains(t, props, "reasoning")
 
-	assert.Contains(t, evalProps, "$ld:ai:judge:relevance")
-
-	metricSchema := evalProps["$ld:ai:judge:relevance"].(map[string]interface{})
-	metricProps := metricSchema["properties"].(map[string]interface{})
-
-	assert.Contains(t, metricProps, "score")
-	assert.Contains(t, metricProps, "reasoning")
-
-	scoreSchema := metricProps["score"].(map[string]interface{})
+	scoreSchema := props["score"].(map[string]interface{})
 	assert.Equal(t, "number", scoreSchema["type"])
 	assert.Equal(t, 0.0, scoreSchema["minimum"])
 	assert.Equal(t, 1.0, scoreSchema["maximum"])
-}
 
-func TestBuildSchema_Empty(t *testing.T) {
-	schema := buildSchema("")
-	assert.Empty(t, schema)
-}
-
-func TestEvaluate_NegativeScore(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     -0.5,
-						"reasoning": "negative score",
-					},
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "invalid score")
-}
-
-func TestEvaluate_ScoreGreaterThanOne(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     1.5,
-						"reasoning": "over limit",
-					},
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "invalid score")
-}
-
-func TestEvaluate_NullEvaluationValue(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": nil,
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "missing evaluation")
-}
-
-func TestEvaluate_NonObjectEvaluationValue(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": "not an object",
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "missing evaluation")
-}
-
-func TestEvaluate_ScoreAsString(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     "0.5",
-						"reasoning": "test",
-					},
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "invalid score")
-}
-
-func TestEvaluate_ReasoningAsNumber(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.5,
-						"reasoning": 123,
-					},
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "invalid reasoning")
-}
-
-func TestEvaluate_EmptyEvaluationsObject(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:relevance",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.False(t, result.Success)
-	assert.Contains(t, result.Error, "missing evaluation")
+	reasoningSchema := props["reasoning"].(map[string]interface{})
+	assert.Equal(t, "string", reasoningSchema["type"])
 }
 
 func TestGetMetricKey_EmptyArray(t *testing.T) {
@@ -700,23 +554,17 @@ func TestGetMetricKey_ArrayWithOnlyEmptyStrings(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing evaluationMetricKey")
 }
 
-func TestEvaluate_ReturnsCorrectResponse(t *testing.T) {
+// TestEvaluate_ResultKeyedByMetricKey verifies that the parsed top-level score/reasoning is keyed
+// by the judge config's evaluation metric key, preserving the dynamic eval-score event keys in the
+// tracking wire contract.
+func TestEvaluate_ResultKeyedByMetricKey(t *testing.T) {
 	config := &mockConfig{
 		evaluationMetricKey: "$ld:ai:judge:relevance",
 		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
 	}
 	tracker := &mockTracker{}
 	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.75,
-						"reasoning": "Good response",
-					},
-				},
-			},
-		},
+		response: StructuredResponse{Content: evaluationContent(0.75, "Good response")},
 	}
 
 	judge, err := New(config, tracker, provider, "my-judge-config", nil)
@@ -726,7 +574,6 @@ func TestEvaluate_ReturnsCorrectResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Verify the returned response has correct values
 	assert.Equal(t, "my-judge-config", result.JudgeConfigKey)
 	assert.True(t, result.Success)
 	assert.Equal(t, 0.75, result.Evals["$ld:ai:judge:relevance"].Score)
@@ -744,15 +591,8 @@ func TestEvaluate_TokenUsageTracked(t *testing.T) {
 	tracker := &mockTracker{}
 	provider := &mockProvider{
 		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.5,
-						"reasoning": "test",
-					},
-				},
-			},
-			Usage: ldai.TokenUsage{Total: 150, Input: 90, Output: 60},
+			Content: evaluationContent(0.5, "test"),
+			Usage:   ldai.TokenUsage{Total: 150, Input: 90, Output: 60},
 		},
 	}
 
@@ -776,15 +616,8 @@ func TestEvaluate_NoTokenUsageWhenZero(t *testing.T) {
 	tracker := &mockTracker{}
 	provider := &mockProvider{
 		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.5,
-						"reasoning": "test",
-					},
-				},
-			},
-			Usage: ldai.TokenUsage{},
+			Content: evaluationContent(0.5, "test"),
+			Usage:   ldai.TokenUsage{},
 		},
 	}
 
@@ -817,125 +650,6 @@ func TestEvaluate_ErrorResponseIncludesJudgeConfigKey(t *testing.T) {
 
 // Integration Tests - These verify end-to-end behavior and patterns not caught by unit tests
 
-// TestDoubleInterpolation_ReservedVariables verifies that the double interpolation pattern works:
-// 1. During config fetch, pass literal strings "{{message_history}}" and "{{response_to_evaluate}}"
-// 2. First interpolation preserves these placeholders in the template
-// 3. During evaluation, second interpolation replaces placeholders with actual values
-func TestDoubleInterpolation_ReservedVariables(t *testing.T) {
-	// Simulate what the client does when fetching a judge config
-	// The config from LaunchDarkly has templates with {{message_history}} and {{response_to_evaluate}}
-	rawTemplate := "Input: {{message_history}}\nOutput: {{response_to_evaluate}}"
-
-	// Simulate first interpolation (done by client.JudgeConfig when fetching judge config)
-	// Variables passed should include literal placeholder strings
-	variablesForFirstInterpolation := map[string]interface{}{
-		"message_history":      "{{message_history}}",      // Literal string!
-		"response_to_evaluate": "{{response_to_evaluate}}", // Literal string!
-	}
-
-	// First interpolation - should preserve placeholders
-	firstInterpolated := interpolateTemplateForTest(rawTemplate, variablesForFirstInterpolation)
-	assert.Equal(t, rawTemplate, firstInterpolated, "First interpolation should preserve placeholders")
-
-	// Now simulate what the judge does during Evaluate()
-	// Second interpolation with actual values
-	actualInput := "What is LaunchDarkly?"
-	actualOutput := "LaunchDarkly is a feature management platform."
-
-	variablesForSecondInterpolation := map[string]interface{}{
-		"message_history":      actualInput,
-		"response_to_evaluate": actualOutput,
-	}
-
-	// Second interpolation - should replace with actual values
-	secondInterpolated := interpolateTemplateForTest(firstInterpolated, variablesForSecondInterpolation)
-	expected := "Input: What is LaunchDarkly?\nOutput: LaunchDarkly is a feature management platform."
-	assert.Equal(t, expected, secondInterpolated, "Second interpolation should replace with actual values")
-}
-
-// TestJudgeEvaluation_WithTemplateInterpolation verifies end-to-end template interpolation
-func TestJudgeEvaluation_WithTemplateInterpolation(t *testing.T) {
-	// Config with templates that should be interpolated during evaluation
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:test",
-		messages: []datamodel.Message{
-			{Role: datamodel.System, Content: "You are a judge"},
-			{Role: datamodel.User, Content: "Input: {{message_history}}"},
-			{Role: datamodel.User, Content: "Output: {{response_to_evaluate}}"},
-		},
-	}
-
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:test": map[string]interface{}{
-						"score":     0.9,
-						"reasoning": "Good response",
-					},
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	// Evaluate with actual input/output
-	actualInput := "What is AI?"
-	actualOutput := "AI is artificial intelligence"
-
-	result, err := judge.Evaluate(actualInput, actualOutput, 1.0)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	// Verify the provider received interpolated messages
-	require.Len(t, provider.calls, 1)
-	messages := provider.calls[0]
-
-	assert.Equal(t, "You are a judge", messages[0].Content)
-	assert.Equal(t, "Input: What is AI?", messages[1].Content, "message_history should be interpolated")
-	assert.Equal(t, "Output: AI is artificial intelligence", messages[2].Content, "response_to_evaluate should be interpolated")
-}
-
-// TestJudgeTracking_ShouldNotTrackInternally verifies that the judge does NOT track responses internally.
-// Tracking should be the responsibility of the caller (AI config being evaluated).
-func TestJudgeTracking_ShouldNotTrackInternally(t *testing.T) {
-	config := &mockConfig{
-		evaluationMetricKey: "$ld:ai:judge:test",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: "test"}},
-	}
-
-	tracker := &mockTracker{}
-	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:test": map[string]interface{}{
-						"score":     0.5,
-						"reasoning": "Test",
-					},
-				},
-			},
-		},
-	}
-
-	judge, err := New(config, tracker, provider, "test-judge", nil)
-	require.NoError(t, err)
-
-	result, err := judge.Evaluate("input", "output", 1.0)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	// CRITICAL: Judge should NOT track responses internally
-	// This should be done by the caller (AI config being evaluated)
-	assert.Len(t, tracker.judgeResponses, 0, "Judge should not track responses internally - caller's responsibility")
-
-	// Verify usage is still tracked (this is judge-specific)
-	assert.Len(t, tracker.usages, 0, "No usage was set in this test")
-}
-
 // TestIntegration_AIConfigTracksJudgeResults simulates the real-world pattern where
 // an AI config evaluates with a judge and tracks results on its own tracker.
 func TestIntegration_AIConfigTracksJudgeResults(t *testing.T) {
@@ -945,7 +659,7 @@ func TestIntegration_AIConfigTracksJudgeResults(t *testing.T) {
 	// Simulate judge's tracker (should NOT be used for judge response tracking)
 	judgeTracker := &mockTracker{}
 
-	// Judge configuration
+	// Judge configuration (legacy template message will be stripped)
 	judgeConfig := &mockConfig{
 		evaluationMetricKey: "$ld:ai:judge:relevance",
 		messages: []datamodel.Message{
@@ -954,16 +668,7 @@ func TestIntegration_AIConfigTracksJudgeResults(t *testing.T) {
 	}
 
 	provider := &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"$ld:ai:judge:relevance": map[string]interface{}{
-						"score":     0.85,
-						"reasoning": "Highly relevant",
-					},
-				},
-			},
-		},
+		response: StructuredResponse{Content: evaluationContent(0.85, "Highly relevant")},
 	}
 
 	// Create judge with its own tracker
@@ -987,70 +692,28 @@ func TestIntegration_AIConfigTracksJudgeResults(t *testing.T) {
 	assert.Len(t, judgeTracker.judgeResponses, 0, "Judge should not track responses internally")
 }
 
-// Helper function to test template interpolation
-func interpolateTemplateForTest(template string, vars map[string]interface{}) string {
-	// Simple string replacement for testing
-	// Real code uses: mustache.New().ParseString(template).RenderString(vars)
-	result := template
-	for key, value := range vars {
-		placeholder := "{{" + key + "}}"
-		if str, ok := value.(string); ok {
-			result = replaceAllForTest(result, placeholder, str)
-		}
-	}
-	return result
-}
-
-func replaceAllForTest(s, old, new string) string {
-	result := ""
-	for {
-		i := indexOfForTest(s, old)
-		if i == -1 {
-			result += s
-			break
-		}
-		result += s[:i] + new
-		s = s[i+len(old):]
-	}
-	return result
-}
-
-func indexOfForTest(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
-func newMinimalJudge(t *testing.T, content string) *Judge {
+func newMinimalJudge(t *testing.T, messages ...datamodel.Message) *Judge {
 	t.Helper()
 	config := &mockConfig{
 		evaluationMetricKey: "metric",
-		messages:            []datamodel.Message{{Role: datamodel.User, Content: content}},
+		messages:            messages,
 	}
 	j, err := New(config, &mockTracker{}, &mockProvider{
-		response: StructuredResponse{
-			Content: map[string]interface{}{
-				"evaluations": map[string]interface{}{
-					"metric": map[string]interface{}{"score": 1.0, "reasoning": "ok"},
-				},
-			},
-		},
+		response: StructuredResponse{Content: evaluationContent(1.0, "ok")},
 	}, "key", nil)
 	require.NoError(t, err)
 	return j
 }
 
 // TestBuildMessages_InjectionVariants is a regression test for HackerOne report #3591852.
-// It covers the full set of Mustache control sequences an attacker could inject via a
-// user-controlled context variable. All variants must be treated as inert literal text by
-// pass 2 — none should cause a placeholder to go unsubstituted.
+// The evaluated conversation is never substituted into judge config messages: legacy template
+// messages (containing the reserved placeholders) are stripped, and the actual history/response
+// are passed in a separate user message. No Mustache control sequence injected via user-controlled
+// content can therefore alter the judge's prompt structure or hide the evaluated content.
 func TestBuildMessages_InjectionVariants(t *testing.T) {
 	variants := []struct {
 		name    string
-		payload string // injected via {{ldctx.user.name}} in the template
+		payload string // attacker-controlled content in the history under evaluation
 	}{
 		{"delimiter change brackets", "{{=[ ]=}}"},
 		{"delimiter change angle", "{{=<% %>=}}"},
@@ -1059,74 +722,117 @@ func TestBuildMessages_InjectionVariants(t *testing.T) {
 		{"triple stache", "{{{raw}}}"},
 		{"section", "{{#section}}inject{{/section}}"},
 		{"inverted section", "{{^section}}inject{{/section}}"},
+		{"literal history placeholder", ldai.JudgePlaceholderMessageHistory},
+		{"literal response placeholder", ldai.JudgePlaceholderResponseToEvaluate},
 	}
 
 	for _, tt := range variants {
 		t.Run(tt.name, func(t *testing.T) {
-			// Hand-craft the pass-1 output: user.name resolved to the attack payload,
-			// reserved placeholder survived as a literal string.
-			afterPass1 := "Auditing " + tt.payload + ": " + ldai.JudgePlaceholderMessageHistory
-
-			// Pass 2: judge substitutes placeholders
-			judge := newMinimalJudge(t, afterPass1)
-			actualHistory := "ACTUAL MESSAGE HISTORY"
+			// Legacy template message: must be stripped, so the payload cannot be expanded into it.
+			judge := newMinimalJudge(t,
+				datamodel.Message{Role: datamodel.User, Content: "Auditing: " + ldai.JudgePlaceholderMessageHistory})
+			actualHistory := "ACTUAL MESSAGE HISTORY " + tt.payload
 			messages := judge.buildMessages(actualHistory, "some output")
 
-			require.Len(t, messages, 1)
+			require.Len(t, messages, 1, "legacy template message must be stripped")
 			assert.Contains(t, messages[0].Content, actualHistory,
-				"payload %q must not blind the judge to the actual history", tt.payload)
-			assert.NotContains(t, messages[0].Content, ldai.JudgePlaceholderMessageHistory,
-				"placeholder must be fully substituted after payload %q", tt.payload)
+				"payload %q must appear verbatim in the evaluation input", tt.payload)
 		})
 	}
 }
 
-// TestBuildMessages_InjectionViaResponse verifies that injection payloads in the response
-// being evaluated (not just the history) are equally neutralized.
-func TestBuildMessages_InjectionViaResponse(t *testing.T) {
-	// Pass-1 output: no user vars resolved, both placeholders survived as literal strings.
-	afterPass1 := "History: " + ldai.JudgePlaceholderMessageHistory +
-		"\nResponse: " + ldai.JudgePlaceholderResponseToEvaluate
-
-	judge := newMinimalJudge(t, afterPass1)
-	maliciousResponse := "{{=[ ]=}} INJECTION ATTEMPT"
-	messages := judge.buildMessages("normal history", maliciousResponse)
-
-	require.Len(t, messages, 1)
-	assert.Contains(t, messages[0].Content, maliciousResponse,
-		"malicious content in response must appear verbatim — not silently dropped")
-	assert.NotContains(t, messages[0].Content, ldai.JudgePlaceholderResponseToEvaluate,
-		"response placeholder must be fully substituted")
-}
-
-// TestBuildMessages_MultiplePlaceholderOccurrences verifies that when a template contains
-// the same placeholder more than once, every occurrence is substituted.
-func TestBuildMessages_MultiplePlaceholderOccurrences(t *testing.T) {
-	template := ldai.JudgePlaceholderMessageHistory + " | " + ldai.JudgePlaceholderMessageHistory
-	judge := newMinimalJudge(t, template)
-	messages := judge.buildMessages("HISTORY", "RESPONSE")
-
-	require.Len(t, messages, 1)
-	assert.Equal(t, "HISTORY | HISTORY", messages[0].Content)
-}
-
-// TestBuildMessages_MustacheSyntaxInContent verifies that Mustache-like syntax inside the
-// actual history or response values is treated as literal text and not silently consumed.
-// The old Mustache-based pass 2 would have rendered unrecognized tags (e.g. {{user}}) as
-// empty strings, corrupting content such as code samples or questions about templating.
+// TestBuildMessages_MustacheSyntaxInContent verifies that Mustache-like syntax inside the actual
+// history or response values is treated as literal text and not silently consumed.
 func TestBuildMessages_MustacheSyntaxInContent(t *testing.T) {
-	template := "History: " + ldai.JudgePlaceholderMessageHistory +
-		"\nResponse: " + ldai.JudgePlaceholderResponseToEvaluate
-	judge := newMinimalJudge(t, template)
+	judge := newMinimalJudge(t, datamodel.Message{Role: datamodel.System, Content: "You are a judge"})
 
 	historyWithMustache := "How do I use {{user}} in Mustache?"
 	responseWithMustache := "Use {{user}} like this: {{#user}}Hello{{/user}}"
 
 	messages := judge.buildMessages(historyWithMustache, responseWithMustache)
 
-	require.Len(t, messages, 1)
-	assert.Contains(t, messages[0].Content, historyWithMustache,
+	require.Len(t, messages, 2)
+	assert.Contains(t, messages[1].Content, historyWithMustache,
 		"Mustache-like syntax in history must be preserved verbatim")
-	assert.Contains(t, messages[0].Content, responseWithMustache,
+	assert.Contains(t, messages[1].Content, responseWithMustache,
 		"Mustache-like syntax in response must be preserved verbatim")
+}
+
+// TestNew_SnapshotsMessages pins the documented contract that New snapshots the config's messages
+// at construction: later changes to what the config reports are not observed by Evaluate.
+func TestNew_SnapshotsMessages(t *testing.T) {
+	config := &mockConfig{
+		evaluationMetricKey: "metric",
+		messages:            []datamodel.Message{{Role: datamodel.System, Content: "original"}},
+	}
+	provider := &mockProvider{
+		response: StructuredResponse{Content: evaluationContent(1.0, "ok")},
+	}
+	judge, err := New(config, &mockTracker{}, provider, "key", nil)
+	require.NoError(t, err)
+
+	config.messages = []datamodel.Message{{Role: datamodel.System, Content: "mutated"}}
+
+	_, err = judge.Evaluate("input", "output", 1.0)
+	require.NoError(t, err)
+
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "original", provider.calls[0][0].Content)
+}
+
+// TestEvaluate_IndependentMessageSlices verifies successive evaluations don't share message
+// slices: mutating one call's messages must not affect the next (no backing-array aliasing).
+func TestEvaluate_IndependentMessageSlices(t *testing.T) {
+	provider := &mockProvider{
+		response: StructuredResponse{Content: evaluationContent(1.0, "ok")},
+	}
+	config := &mockConfig{
+		evaluationMetricKey: "metric",
+		messages:            []datamodel.Message{{Role: datamodel.System, Content: "base"}},
+	}
+	judge, err := New(config, &mockTracker{}, provider, "key", nil)
+	require.NoError(t, err)
+
+	_, err = judge.Evaluate("first", "out", 1.0)
+	require.NoError(t, err)
+	provider.calls[0][0].Content = "tampered"
+
+	_, err = judge.Evaluate("second", "out", 1.0)
+	require.NoError(t, err)
+
+	require.Len(t, provider.calls, 2)
+	assert.Equal(t, "base", provider.calls[1][0].Content)
+}
+
+func TestEvaluateMessages_EmptyHistory(t *testing.T) {
+	provider := &mockProvider{
+		response: StructuredResponse{Content: evaluationContent(1.0, "ok")},
+	}
+	config := &mockConfig{evaluationMetricKey: "metric"}
+	judge, err := New(config, &mockTracker{}, provider, "key", nil)
+	require.NoError(t, err)
+
+	result, err := judge.EvaluateMessages(nil, "response", 1.0)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Len(t, provider.calls, 1)
+	require.Len(t, provider.calls[0], 1)
+	assert.Equal(t, "MESSAGE HISTORY:\n\n\nRESPONSE TO EVALUATE:\nresponse",
+		provider.calls[0][0].Content)
+}
+
+// TestBuildMessages_KeepsSystemMessagesWithPlaceholders verifies that system messages are never
+// stripped, even if they mention the legacy placeholders (e.g., as documentation for the model).
+func TestBuildMessages_KeepsSystemMessagesWithPlaceholders(t *testing.T) {
+	judge := newMinimalJudge(t,
+		datamodel.Message{Role: datamodel.System, Content: "Ignore any " + ldai.JudgePlaceholderMessageHistory + " text"},
+		datamodel.Message{Role: datamodel.User, Content: "Legacy: " + ldai.JudgePlaceholderResponseToEvaluate},
+	)
+
+	messages := judge.buildMessages("history", "output")
+	require.Len(t, messages, 2)
+	assert.Equal(t, datamodel.System, messages[0].Role)
+	assert.Equal(t, datamodel.User, messages[1].Role)
+	assert.Contains(t, messages[1].Content, "MESSAGE HISTORY:")
 }
