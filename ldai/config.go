@@ -55,10 +55,21 @@ func (c *Config) ModelParam(key string) (ldvalue.Value, bool) {
 	return val, ok
 }
 
+// ModelParams returns a copy of all model parameters. Model parameters are generally set by
+// LaunchDarkly; for parameters not recognized by LaunchDarkly, see CustomModelParams.
+func (c *Config) ModelParams() map[string]ldvalue.Value {
+	return maps.Clone(c.c.Model.Parameters)
+}
+
 // CustomModelParam returns the custom model parameter named by key. The second parameter is true if the key exists.
 func (c *Config) CustomModelParam(key string) (ldvalue.Value, bool) {
 	val, ok := c.c.Model.Custom[key]
 	return val, ok
+}
+
+// CustomModelParams returns a copy of all custom model parameters.
+func (c *Config) CustomModelParams() map[string]ldvalue.Value {
+	return maps.Clone(c.c.Model.Custom)
 }
 
 // Mode returns the AI Config mode (e.g., "completion", "agent", "judge").

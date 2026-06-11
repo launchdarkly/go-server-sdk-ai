@@ -110,6 +110,25 @@ type Judge struct {
 	SamplingRate float64 `json:"samplingRate"`
 }
 
+// TokenUsage represents the token usage returned by a model provider for a specific request.
+// Unlike the other types in this package, it is not part of the AI Config JSON representation
+// and intentionally has no JSON tags.
+type TokenUsage struct {
+	// Total is the total number of tokens used.
+	Total int
+
+	// Input is the number of input tokens used.
+	Input int
+
+	// Output is the number of output tokens used.
+	Output int
+}
+
+// Set returns true if any of the fields are non-zero.
+func (t TokenUsage) Set() bool {
+	return t.Total > 0 || t.Input > 0 || t.Output > 0
+}
+
 // EvalScore represents a single evaluation metric result.
 type EvalScore struct {
 	// Score is the evaluation score between 0.0 and 1.0.

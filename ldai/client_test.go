@@ -435,6 +435,28 @@ func TestJudgeConfigMethodTracking(t *testing.T) {
 		"JudgeConfig must not emit $ld:ai:usage:completion-config to avoid double-counting")
 }
 
+func TestModelParamsEnumeration(t *testing.T) {
+	cfg := NewConfig().
+		WithModelParam("temperature", ldvalue.Float64(0.5)).
+		WithModelParam("maxTokens", ldvalue.Int(1024)).
+		WithCustomModelParam("custom", ldvalue.String("value")).
+		Build()
+
+	assert.Equal(t, map[string]ldvalue.Value{
+		"temperature": ldvalue.Float64(0.5),
+		"maxTokens":   ldvalue.Int(1024),
+	}, cfg.ModelParams())
+	assert.Equal(t, map[string]ldvalue.Value{
+		"custom": ldvalue.String("value"),
+	}, cfg.CustomModelParams())
+
+	// The returned maps are copies: mutating them must not affect the config.
+	cfg.ModelParams()["temperature"] = ldvalue.String("mutated")
+	val, ok := cfg.ModelParam("temperature")
+	require.True(t, ok)
+	assert.Equal(t, ldvalue.Float64(0.5), val)
+}
+
 func TestCanSetModelParameters(t *testing.T) {
 	client, err := NewClient(newMockSDK(nil, nil))
 	require.NoError(t, err)

@@ -39,15 +39,8 @@ func newRunID() string {
 }
 
 // TokenUsage represents the token usage returned by a model provider for a specific request.
-type TokenUsage struct {
-	// Total is the total number of tokens used.
-	Total int
-	// Input is the number of input tokens used.
-	Input int
-
-	// Output is the number of output tokens used.
-	Output int
-}
+// It is an alias for datamodel.TokenUsage, which is shared with the providers package.
+type TokenUsage = datamodel.TokenUsage
 
 // MetricSummary represents a summary of metrics tracked by the tracker.
 type MetricSummary struct {
@@ -61,11 +54,6 @@ type MetricSummary struct {
 	Success ldcommon.Option[bool]
 	// TimeToFirstToken is the time to the first token in milliseconds.
 	TimeToFirstToken ldcommon.Option[time.Duration]
-}
-
-// Set returns true if any of the fields are non-zero.
-func (t TokenUsage) Set() bool {
-	return t.Total > 0 || t.Input > 0 || t.Output > 0
 }
 
 // Metrics represents the metrics returned by a model provider for a specific request.
