@@ -1,40 +1,50 @@
 package judge
 
+// JSON Schema keywords used to build the judge's structured-output schema.
+const (
+	schemaType                 = "type"
+	schemaProperties           = "properties"
+	schemaDescription          = "description"
+	schemaRequired             = "required"
+	schemaAdditionalProperties = "additionalProperties"
+	schemaObject               = "object"
+)
+
 func buildSchema(metricKey string) map[string]interface{} {
 	if metricKey == "" {
 		return map[string]interface{}{}
 	}
 
 	return map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
+		schemaType: schemaObject,
+		schemaProperties: map[string]interface{}{
 			"evaluations": map[string]interface{}{
-				"type":        "object",
-				"description": "Object containing evaluation results for " + metricKey + " metric",
-				"properties": map[string]interface{}{
+				schemaType:        schemaObject,
+				schemaDescription: "Object containing evaluation results for " + metricKey + " metric",
+				schemaProperties: map[string]interface{}{
 					metricKey: map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
+						schemaType: schemaObject,
+						schemaProperties: map[string]interface{}{
 							"score": map[string]interface{}{
-								"type":        "number",
-								"minimum":     0.0,
-								"maximum":     1.0,
-								"description": "Score between 0.0 and 1.0 for " + metricKey,
+								schemaType:        "number",
+								"minimum":         0.0,
+								"maximum":         1.0,
+								schemaDescription: "Score between 0.0 and 1.0 for " + metricKey,
 							},
 							"reasoning": map[string]interface{}{
-								"type":        "string",
-								"description": "Reasoning behind the score for " + metricKey,
+								schemaType:        "string",
+								schemaDescription: "Reasoning behind the score for " + metricKey,
 							},
 						},
-						"required":             []string{"score", "reasoning"},
-						"additionalProperties": false,
+						schemaRequired:             []string{"score", "reasoning"},
+						schemaAdditionalProperties: false,
 					},
 				},
-				"required":             []string{metricKey},
-				"additionalProperties": false,
+				schemaRequired:             []string{metricKey},
+				schemaAdditionalProperties: false,
 			},
 		},
-		"required":             []string{"evaluations"},
-		"additionalProperties": false,
+		schemaRequired:             []string{"evaluations"},
+		schemaAdditionalProperties: false,
 	}
 }
