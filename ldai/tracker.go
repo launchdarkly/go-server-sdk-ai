@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,7 @@ const (
 	tokenInput = "$ld:ai:tokens:input"
 	//nolint:gosec
 	tokenOutput = "$ld:ai:tokens:output"
+	toolCall    = "$ld:ai:tool_call"
 )
 
 // newRunID returns a fresh UUIDv4 that LaunchDarkly uses to group all metric
@@ -39,15 +41,8 @@ func newRunID() string {
 }
 
 // TokenUsage represents the token usage returned by a model provider for a specific request.
-type TokenUsage struct {
-	// Total is the total number of tokens used.
-	Total int
-	// Input is the number of input tokens used.
-	Input int
-
-	// Output is the number of output tokens used.
-	Output int
-}
+// It is an alias for datamodel.TokenUsage.
+type TokenUsage = datamodel.TokenUsage
 
 // MetricSummary represents a summary of metrics tracked by the tracker.
 type MetricSummary struct {
@@ -61,11 +56,8 @@ type MetricSummary struct {
 	Success ldcommon.Option[bool]
 	// TimeToFirstToken is the time to the first token in milliseconds.
 	TimeToFirstToken ldcommon.Option[time.Duration]
-}
-
-// Set returns true if any of the fields are non-zero.
-func (t TokenUsage) Set() bool {
-	return t.Total > 0 || t.Input > 0 || t.Output > 0
+	// ToolCalls is the accumulated list of tool keys tracked on this tracker, in tracking order.
+	ToolCalls []string
 }
 
 // Metrics represents the metrics returned by a model provider for a specific request.
@@ -75,6 +67,10 @@ type Metrics struct {
 	// TimeToFirstToken is the time to the first token of the streamed response.
 	TimeToFirstToken time.Duration
 }
+
+// AIMetrics contains the metrics for a single AI operation, as extracted from an arbitrary
+// operation result by TrackMetricsOf. It is an alias for datamodel.AIMetrics.
+type AIMetrics = datamodel.AIMetrics
 
 // ProviderResponse represents the response from a model provider for a specific request.
 type ProviderResponse struct {
@@ -150,6 +146,7 @@ type Tracker struct {
 	tokens           ldcommon.Option[TokenUsage]
 	success          ldcommon.Option[bool]
 	timeToFirstToken ldcommon.Option[time.Duration]
+	toolCalls        []string
 }
 
 // Used if a custom Stopwatch is not provided.
@@ -401,14 +398,40 @@ func (t *Tracker) TrackUsage(usage TokenUsage) error {
 	return t.TrackTokens(usage)
 }
 
-func measureDurationOfTask[T any, A any](
-	stopwatch Stopwatch,
-	arg A,
-	task func(A) (T, error),
-) (T, time.Duration, error) {
-	stopwatch.Start()
-	result, err := task(arg)
-	return result, stopwatch.Stop(), err
+// TrackToolCall tracks a tool call made during an AI run.
+//
+// May be called multiple times per Tracker; each call records a tool call event for the provided
+// tool key and appends it to the summary.
+func (t *Tracker) TrackToolCall(toolKey string) error {
+	t.toolCalls = append(t.toolCalls, toolKey)
+	data := t.trackDataWith("toolKey", ldvalue.String(toolKey))
+	return t.events.TrackMetric(toolCall, t.context, 1, data)
+}
+
+// TrackToolCalls tracks the tool calls made during an AI run, recording one event per tool key.
+//
+// May be called multiple times per Tracker; tool keys accumulate in the summary.
+func (t *Tracker) TrackToolCalls(toolKeys []string) error {
+	var failed bool
+	for _, toolKey := range toolKeys {
+		if err := t.TrackToolCall(toolKey); err != nil {
+			t.logWarning("error tracking tool call %q: %v", toolKey, err)
+			failed = true
+		}
+	}
+	if failed {
+		return fmt.Errorf("tracker: error tracking tool calls, logs contain more information")
+	}
+	return nil
+}
+
+// trackDataWith returns the tracker's event data with one additional field merged in.
+func (t *Tracker) trackDataWith(key string, value ldvalue.Value) ldvalue.Value {
+	builder := ldvalue.ObjectBuild()
+	for _, k := range t.trackData.Keys(nil) {
+		builder.Set(k, t.trackData.GetByKey(k))
+	}
+	return builder.Set(key, value).Build()
 }
 
 // GetSummary returns a summary of all metrics that have been tracked using this tracker.
@@ -419,61 +442,134 @@ func (t *Tracker) GetSummary() MetricSummary {
 		Tokens:           t.tokens,
 		Success:          t.success,
 		TimeToFirstToken: t.timeToFirstToken,
+		ToolCalls:        slices.Clone(t.toolCalls),
 	}
 }
 
-// TrackRequest tracks metrics for a model evaluation request. The task function should return a ProviderResponse
-// which can be used to specify request metrics and token usage. All fields of the returned ProviderResponse are
+// logTrackErr logs a delivery failure from an inner Track call made on behalf of a wrapper
+// (TrackMetricsOf, TrackRequest). Wrappers log these rather than failing the whole operation.
+func (t *Tracker) logTrackErr(what string, err error) {
+	if err != nil {
+		t.logWarning("error tracking %s metric for operation: %v", what, err)
+	}
+}
+
+// extractMetrics calls metricsExtractor, recovering a panic into nil metrics (with a logged
+// warning) so a metrics-extraction bug degrades to duration-only tracking instead of losing the
+// whole operation's metrics. This mirrors the Python SDK, which catches extractor exceptions.
+func extractMetrics[T any](t *Tracker, metricsExtractor func(T) *AIMetrics, result T) (metrics *AIMetrics) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.logWarning("panic extracting metrics from operation result: %v", r)
+			metrics = nil
+		}
+	}()
+	return metricsExtractor(result)
+}
+
+// TrackMetricsOf runs task and tracks the metrics of the resulting AI operation, without
+// requiring the operation to be tied to the tracker's AI Config (compare TrackRequest, which is
+// implemented in terms of this function). It is a package-level function because Go does not
+// permit type parameters on methods.
+//
+// The task's duration is always tracked, even if the task panics (the panic is then propagated).
+// If the task returns an error, an unsuccessful generation is tracked and the error is returned.
+// Otherwise metricsExtractor derives metrics from the task's result: a non-zero
+// AIMetrics.Duration replaces the wall-clock measurement, success or error is tracked per
+// AIMetrics.Success, and any time to first token, token usage, and tool calls present are
+// tracked. A nil *AIMetrics from the extractor — or a nil metricsExtractor — tracks the duration
+// only. A panic in the extractor is recovered and logged, degrading to duration-only tracking.
+//
+// Subsequent calls re-run the task, but at-most-once metrics already recorded on the tracker are
+// not emitted again (tool call events are multi-fire).
+func TrackMetricsOf[T any](
+	t *Tracker,
+	metricsExtractor func(T) *AIMetrics,
+	task func() (T, error),
+) (T, error) {
+	t.stopwatch.Start()
+	completed := false
+	defer func() {
+		if !completed { // the task panicked; record what we know, then let the panic propagate
+			t.logTrackErr("duration", t.TrackDuration(t.stopwatch.Stop()))
+			t.logTrackErr("error", t.TrackError())
+		}
+	}()
+	result, err := task()
+	elapsed := t.stopwatch.Stop()
+	completed = true
+
+	var metrics *AIMetrics
+	if err == nil && metricsExtractor != nil {
+		metrics = extractMetrics(t, metricsExtractor, result)
+	}
+
+	trackedDuration := elapsed
+	if metrics != nil && metrics.Duration != 0 {
+		trackedDuration = metrics.Duration
+	}
+	t.logTrackErr("duration", t.TrackDuration(trackedDuration))
+
+	if err != nil {
+		t.logTrackErr("error", t.TrackError())
+		return result, err
+	}
+	if metrics == nil {
+		return result, nil
+	}
+
+	if metrics.Success {
+		t.logTrackErr("success", t.TrackSuccess())
+	} else {
+		t.logTrackErr("error", t.TrackError())
+	}
+
+	if metrics.TimeToFirstToken != 0 {
+		t.logTrackErr("time to first token", t.TrackTimeToFirstToken(metrics.TimeToFirstToken))
+	}
+
+	if metrics.Tokens.Set() {
+		// TrackTokens logs errors.
+		_ = t.TrackTokens(metrics.Tokens)
+	}
+
+	if len(metrics.ToolCalls) > 0 {
+		// TrackToolCalls logs errors.
+		_ = t.TrackToolCalls(metrics.ToolCalls)
+	}
+
+	return result, nil
+}
+
+// TrackRequest tracks metrics for a model evaluation request. It is a convenience form of
+// TrackMetricsOf for tasks that work with the tracker's AI Config and report a ProviderResponse:
+// the task receives the current AI Config, and all fields of the returned ProviderResponse are
 // optional.
 //
-// The task function will be passed the current AI Config, which can be used to obtain any parameters or messages
-// relevant to the request.
-//
-// If the task returns an error, then the request is not considered successful and no metrics are tracked.
-// Otherwise, the following metrics are tracked:
-//  1. Successful model evaluation.
-//  2. Any metrics that were that set in the ProviderResponse
-//     2a) If Latency was not set in the ProviderResponse's Metrics field, an automatically measured duration.
-//  3. Any token usage that was set in the ProviderResponse.
+// The request's duration is always tracked, using the ProviderResponse's Latency when set and an
+// automatically measured duration otherwise. If the task returns an error, an unsuccessful
+// generation is tracked and the error is returned with a zero ProviderResponse. Otherwise a
+// successful generation is tracked along with any time to first token and token usage set in the
+// ProviderResponse.
 //
 // Subsequent calls re-run the task but emit only metrics not already recorded
 // on this Tracker. Call CreateTracker on the AI Config to start a new run.
 func (t *Tracker) TrackRequest(task func(c *Config) (ProviderResponse, error)) (ProviderResponse, error) {
-	usage, duration, err := measureDurationOfTask(t.stopwatch, t.config, task)
-	if err != nil {
-		if e := t.TrackError(); e != nil {
-			t.logWarning("error tracking error metric for request: %v", e)
+	response, err := TrackMetricsOf(t, func(r ProviderResponse) *AIMetrics {
+		return &AIMetrics{
+			Success:          true,
+			Tokens:           r.Usage,
+			Duration:         r.Metrics.Latency,
+			TimeToFirstToken: r.Metrics.TimeToFirstToken,
 		}
-
+	}, func() (ProviderResponse, error) {
+		return task(t.config)
+	})
+	if err != nil {
 		t.logWarning("error executing request: %v", err)
 		return ProviderResponse{}, err
 	}
-	if err := t.TrackSuccess(); err != nil {
-		t.logWarning("error tracking success metric for request: %v", err)
-	}
-
-	if usage.Metrics.Latency != 0 {
-		if err := t.TrackDuration(usage.Metrics.Latency); err != nil {
-			t.logWarning("error tracking duration metric (user provided) for request: %v", err)
-		}
-	} else {
-		if err := t.TrackDuration(duration); err != nil {
-			t.logWarning("error tracking duration metric (automatically measured) for request: %v", err)
-		}
-	}
-
-	if usage.Metrics.TimeToFirstToken != 0 {
-		if err := t.TrackTimeToFirstToken(usage.Metrics.TimeToFirstToken); err != nil {
-			t.logWarning("error tracking time to first token metric for request: %v", err)
-		}
-	}
-
-	if usage.Usage.Set() {
-		// TrackTokens logs errors.
-		_ = t.TrackTokens(usage.Usage)
-	}
-
-	return usage, nil
+	return response, nil
 }
 
 // TrackJudgeResponse tracks the evaluation scores from a judge response.
@@ -488,11 +584,7 @@ func (t *Tracker) TrackJudgeResponse(response datamodel.JudgeResponse) error {
 	// Build the data object once, since it's constant across all iterations
 	data := t.trackData
 	if response.JudgeConfigKey != "" {
-		builder := ldvalue.ObjectBuild()
-		for _, key := range t.trackData.Keys(nil) {
-			builder.Set(key, t.trackData.GetByKey(key))
-		}
-		data = builder.Set("judgeConfigKey", ldvalue.String(response.JudgeConfigKey)).Build()
+		data = t.trackDataWith("judgeConfigKey", ldvalue.String(response.JudgeConfigKey))
 	}
 
 	var failed bool

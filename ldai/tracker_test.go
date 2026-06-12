@@ -3,6 +3,7 @@ package ldai
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
+	"github.com/launchdarkly/go-sdk-common/v4/ldlog"
 	"github.com/launchdarkly/go-sdk-common/v4/ldlogtest"
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 )
@@ -215,9 +217,29 @@ func TestTracker_LatencyMeasuredIfNotProvided(t *testing.T) {
 	assert.Equal(t, expectedResponse, r)
 
 	require.Equal(t, 3, len(events.events))
-	gotEvent := events.events[1]
+	gotEvent := events.events[0]
 	assert.Equal(t, "$ld:ai:duration:total", gotEvent.name)
 	assert.Equal(t, 42.0, gotEvent.metricValue)
+}
+
+func TestTracker_TrackRequestErrorTracksDurationAndError(t *testing.T) {
+	events := newMockEvents()
+	mockLog := ldlogtest.NewMockLog()
+	tracker := newTrackerWithStopwatch(
+		events, newRunID(), "key", "variationKey", 5, ldcontext.New("key"), &Config{}, mockLog.Loggers,
+		mockStopwatch(42*time.Millisecond))
+
+	taskErr := errors.New("provider unavailable")
+	response, err := tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
+		return ProviderResponse{Usage: TokenUsage{Total: 99}}, taskErr
+	})
+
+	assert.ErrorIs(t, err, taskErr)
+	assert.Equal(t, ProviderResponse{}, response, "a failed request returns a zero response")
+	assert.Equal(t, []string{"$ld:ai:duration:total", "$ld:ai:generation:error"}, eventNames(events),
+		"failed requests record their duration, matching the other AI SDKs")
+	assert.Equal(t, 42.0, events.events[0].metricValue)
+	mockLog.AssertMessageMatch(t, true, ldlog.Warn, "error executing request")
 }
 
 func TestTracker_TrackDuration(t *testing.T) {
@@ -673,4 +695,354 @@ func TestTracker_ResumptionToken(t *testing.T) {
 		assert.False(t, hasModel, "token should not contain modelName")
 		assert.False(t, hasProvider, "token should not contain providerName")
 	})
+}
+
+func eventNames(events *mockEvents) []string {
+	names := make([]string, 0, len(events.events))
+	for _, e := range events.events {
+		names = append(names, e.name)
+	}
+	return names
+}
+
+func TestTracker_TrackToolCall(t *testing.T) {
+	events := newMockEvents()
+	config := &Config{}
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil)
+
+	assert.NoError(t, tracker.TrackToolCall("search"))
+	assert.NoError(t, tracker.TrackToolCall("calculator"))
+
+	require.Len(t, events.events, 2, "tool calls are multi-fire, one event per call")
+	for i, expectedKey := range []string{"search", "calculator"} {
+		evt := events.events[i]
+		assert.Equal(t, "$ld:ai:tool_call", evt.name)
+		assert.Equal(t, 1.0, evt.metricValue)
+		assert.Equal(t, ldcontext.New("key"), evt.context)
+		// The event data is the base track data plus the toolKey.
+		assert.Equal(t, expectedKey, evt.data.GetByKey("toolKey").StringValue())
+		assert.Equal(t, "key", evt.data.GetByKey("configKey").StringValue())
+		assert.Equal(t, "variationKey", evt.data.GetByKey("variationKey").StringValue())
+		assert.Equal(t, 1, evt.data.GetByKey("version").IntValue())
+		assert.Equal(t, SDKName, evt.data.GetByKey("aiSdkName").StringValue())
+		assert.Equal(t, Version, evt.data.GetByKey("aiSdkVersion").StringValue())
+		assert.NotEmpty(t, evt.data.GetByKey("runId").StringValue())
+	}
+	assert.Equal(t, []string{"search", "calculator"}, tracker.GetSummary().ToolCalls)
+}
+
+func TestTracker_TrackToolCalls(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	assert.NoError(t, tracker.TrackToolCalls([]string{"a", "b"}))
+	assert.NoError(t, tracker.TrackToolCalls([]string{"c"}))
+
+	require.Len(t, events.events, 3)
+	var keys []string
+	for _, e := range events.events {
+		assert.Equal(t, "$ld:ai:tool_call", e.name)
+		keys = append(keys, e.data.GetByKey("toolKey").StringValue())
+	}
+	assert.Equal(t, []string{"a", "b", "c"}, keys, "one event per key, in order, accumulating across calls")
+	assert.Equal(t, []string{"a", "b", "c"}, tracker.GetSummary().ToolCalls)
+}
+
+// TestTracker_TrackTokensZeroUsageDoesNotLatch pins the deliberate divergence from Python/Node:
+// tracking a zero TokenUsage emits nothing and leaves the at-most-once token slot open, so a
+// later call with real usage is still recorded.
+func TestTracker_TrackTokensZeroUsageDoesNotLatch(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	assert.NoError(t, tracker.TrackTokens(TokenUsage{}))
+	assert.Empty(t, events.events)
+	assert.True(t, tracker.GetSummary().Tokens.IsNone())
+
+	assert.NoError(t, tracker.TrackTokens(TokenUsage{Total: 5}))
+	assert.Equal(t, []string{"$ld:ai:tokens:total"}, eventNames(events))
+	assert.True(t, tracker.GetSummary().Tokens.IsSome())
+}
+
+func TestTracker_TrackUsageAliasesTrackTokens(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	assert.NoError(t, tracker.TrackUsage(TokenUsage{Total: 5})) //nolint:staticcheck // testing the deprecated alias
+	assert.Equal(t, []string{"$ld:ai:tokens:total"}, eventNames(events))
+	assert.True(t, tracker.GetSummary().Tokens.IsSome())
+}
+
+func TestTracker_TrackJudgeResponseSinkFailure(t *testing.T) {
+	events := newMockEvents()
+	sink := &failingSink{inner: events}
+	tracker := newTracker(sink, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{},
+		events.log.Loggers)
+
+	err := tracker.TrackJudgeResponse(datamodel.JudgeResponse{
+		Success:        true,
+		JudgeConfigKey: "my-judge",
+		Evals: map[string]datamodel.EvalScore{
+			"$ld:ai:judge:relevance": {Score: 0.5, Reasoning: "ok"},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error tracking evaluation scores")
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking metric")
+}
+
+func TestTracker_GetSummaryToolCallsIsCopied(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	_ = tracker.TrackToolCall("search")
+	summary := tracker.GetSummary()
+	summary.ToolCalls[0] = "mutated"
+
+	assert.Equal(t, []string{"search"}, tracker.GetSummary().ToolCalls,
+		"mutating the returned slice must not affect the tracker")
+}
+
+// failingSink records events like mockEvents but reports a delivery failure for every event.
+type failingSink struct {
+	inner *mockEvents
+}
+
+func (f *failingSink) TrackMetric(name string, ctx ldcontext.Context, v float64, data ldvalue.Value) error {
+	_ = f.inner.TrackMetric(name, ctx, v, data)
+	return errors.New("sink failure")
+}
+
+func TestTracker_TrackToolCallsSinkFailure(t *testing.T) {
+	events := newMockEvents()
+	sink := &failingSink{inner: events}
+	tracker := newTracker(sink, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{},
+		events.log.Loggers)
+
+	err := tracker.TrackToolCalls([]string{"a", "b"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error tracking tool calls")
+	assert.Equal(t, []string{"a", "b"}, tracker.GetSummary().ToolCalls,
+		"tool calls are recorded in the summary even when event delivery fails")
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, `error tracking tool call "a"`)
+}
+
+func TestTrackMetricsOf_SinkFailureLogsAndContinues(t *testing.T) {
+	events := newMockEvents()
+	sink := &failingSink{inner: events}
+	tracker := newTrackerWithStopwatch(sink, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+		&Config{}, events.log.Loggers, mockStopwatch(42*time.Millisecond))
+
+	result, err := TrackMetricsOf(tracker, func(s string) *AIMetrics {
+		return &AIMetrics{
+			Success:   true,
+			Tokens:    TokenUsage{Total: 5, Input: 3, Output: 2},
+			ToolCalls: []string{"search"},
+		}
+	}, func() (string, error) {
+		return "ok", nil
+	})
+
+	require.NoError(t, err, "event delivery failures are logged, not returned")
+	assert.Equal(t, "ok", result)
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking duration metric")
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking success metric")
+}
+
+func TestTrackMetricsOf_TaskErrorSinkFailureLogs(t *testing.T) {
+	events := newMockEvents()
+	sink := &failingSink{inner: events}
+	tracker := newTrackerWithStopwatch(sink, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+		&Config{}, events.log.Loggers, mockStopwatch(42*time.Millisecond))
+
+	taskErr := errors.New("model unavailable")
+	_, err := TrackMetricsOf(tracker, nil, func() (struct{}, error) {
+		return struct{}{}, taskErr
+	})
+
+	assert.ErrorIs(t, err, taskErr)
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking duration metric")
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking error metric")
+}
+
+func TestTrackMetricsOf_Success(t *testing.T) {
+	events := newMockEvents()
+	config := &Config{}
+	tracker := newTrackerWithStopwatch(
+		events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil,
+		mockStopwatch(42*time.Millisecond))
+
+	type providerResult struct {
+		output string
+	}
+
+	result, err := TrackMetricsOf(tracker, func(r providerResult) *AIMetrics {
+		return &AIMetrics{
+			Success:          true,
+			Tokens:           TokenUsage{Total: 30, Input: 20, Output: 10},
+			ToolCalls:        []string{"search"},
+			TimeToFirstToken: 7 * time.Millisecond,
+		}
+	}, func() (providerResult, error) {
+		return providerResult{output: "hello"}, nil
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "hello", result.output)
+
+	assert.Equal(t, []string{
+		"$ld:ai:duration:total",
+		"$ld:ai:generation:success",
+		"$ld:ai:tokens:ttf",
+		"$ld:ai:tokens:total",
+		"$ld:ai:tokens:input",
+		"$ld:ai:tokens:output",
+		"$ld:ai:tool_call",
+	}, eventNames(events))
+	assert.Equal(t, 42.0, events.events[0].metricValue, "duration is the measured wall-clock time")
+	assert.Equal(t, 7.0, events.events[2].metricValue, "time to first token from the extracted metrics")
+
+	summary := tracker.GetSummary()
+	assert.True(t, summary.Success.IsSome() && summary.Success.Unwrap())
+	assert.Equal(t, []string{"search"}, summary.ToolCalls)
+}
+
+func TestTrackMetricsOf_ProvidedDurationOverridesMeasured(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTrackerWithStopwatch(
+		events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil,
+		mockStopwatch(42*time.Millisecond))
+
+	_, err := TrackMetricsOf(tracker, func(struct{}) *AIMetrics {
+		return &AIMetrics{Success: true, Duration: 25 * time.Millisecond}
+	}, func() (struct{}, error) {
+		return struct{}{}, nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "$ld:ai:duration:total", events.events[0].name)
+	assert.Equal(t, 25.0, events.events[0].metricValue)
+}
+
+func TestTrackMetricsOf_TaskError(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTrackerWithStopwatch(
+		events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil,
+		mockStopwatch(42*time.Millisecond))
+
+	taskErr := errors.New("model unavailable")
+	_, err := TrackMetricsOf(tracker, func(struct{}) *AIMetrics {
+		t.Error("extractor must not run when the task fails")
+		return nil
+	}, func() (struct{}, error) {
+		return struct{}{}, taskErr
+	})
+
+	assert.ErrorIs(t, err, taskErr)
+	assert.Equal(t, []string{"$ld:ai:duration:total", "$ld:ai:generation:error"}, eventNames(events))
+}
+
+func TestTrackMetricsOf_UnsuccessfulMetrics(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	_, err := TrackMetricsOf(tracker, func(struct{}) *AIMetrics {
+		return &AIMetrics{Success: false}
+	}, func() (struct{}, error) {
+		return struct{}{}, nil
+	})
+
+	require.NoError(t, err, "the task succeeded; only the tracked status is unsuccessful")
+	assert.Equal(t, []string{"$ld:ai:duration:total", "$ld:ai:generation:error"}, eventNames(events))
+}
+
+func TestTrackMetricsOf_NilExtractorTracksDurationOnly(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	_, err := TrackMetricsOf(tracker, nil, func() (struct{}, error) {
+		return struct{}{}, nil
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"$ld:ai:duration:total"}, eventNames(events))
+}
+
+func TestTrackMetricsOf_NilMetricsTracksDurationOnly(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil)
+
+	// Mirrors a Python extractor returning None: this result has no usable metrics, so only the
+	// duration is tracked — in particular, no generation success/error.
+	_, err := TrackMetricsOf(tracker, func(struct{}) *AIMetrics {
+		return nil
+	}, func() (struct{}, error) {
+		return struct{}{}, nil
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"$ld:ai:duration:total"}, eventNames(events))
+	assert.True(t, tracker.GetSummary().Success.IsNone(), "success/error slot must remain open")
+}
+
+func TestTrackMetricsOf_ExtractorPanicDegradesToDurationOnly(t *testing.T) {
+	events := newMockEvents()
+	mockLog := ldlogtest.NewMockLog()
+	tracker := newTrackerWithStopwatch(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+		&Config{}, mockLog.Loggers, mockStopwatch(42*time.Millisecond))
+
+	result, err := TrackMetricsOf(tracker, func(string) *AIMetrics {
+		panic("nil deref in extractor")
+	}, func() (string, error) {
+		return "ok", nil
+	})
+
+	require.NoError(t, err, "the operation succeeded; a metrics-extraction bug must not fail it")
+	assert.Equal(t, "ok", result)
+	assert.Equal(t, []string{"$ld:ai:duration:total"}, eventNames(events))
+	mockLog.AssertMessageMatch(t, true, ldlog.Warn, "panic extracting metrics")
+}
+
+func TestTrackMetricsOf_TaskPanicTracksDurationAndError(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTrackerWithStopwatch(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+		&Config{}, nil, mockStopwatch(42*time.Millisecond))
+
+	assert.PanicsWithValue(t, "provider exploded", func() {
+		_, _ = TrackMetricsOf(tracker, nil, func() (struct{}, error) {
+			panic("provider exploded")
+		})
+	})
+
+	assert.Equal(t, []string{"$ld:ai:duration:total", "$ld:ai:generation:error"}, eventNames(events),
+		"a panicking task still records duration and an unsuccessful generation")
+	assert.Equal(t, 42.0, events.events[0].metricValue)
+}
+
+func TestTrackMetricsOf_SecondCallRerunsTaskWithoutDuplicateMetrics(t *testing.T) {
+	events := newMockEvents()
+	tracker := newTracker(
+		events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, newMockEvents().log.Loggers)
+
+	calls := 0
+	run := func() (int, error) {
+		calls++
+		return calls, nil
+	}
+	extract := func(int) *AIMetrics {
+		return &AIMetrics{Success: true, ToolCalls: []string{"search"}}
+	}
+
+	_, err := TrackMetricsOf(tracker, extract, run)
+	require.NoError(t, err)
+	result, err := TrackMetricsOf(tracker, extract, run)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result, "the task runs again")
+	assert.Equal(t, []string{
+		"$ld:ai:duration:total",
+		"$ld:ai:generation:success",
+		"$ld:ai:tool_call",
+		"$ld:ai:tool_call",
+	}, eventNames(events), "at-most-once metrics are not re-emitted; tool calls are multi-fire")
 }
