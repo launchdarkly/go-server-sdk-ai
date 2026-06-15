@@ -1,7 +1,7 @@
 package ldai
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"regexp"
 
@@ -53,7 +53,12 @@ const (
 	sdkInfoEvent          = "$ld:ai:sdk:info"
 	usageCompletionConfig = "$ld:ai:usage:completion-config"
 	usageJudgeConfig      = "$ld:ai:usage:judge-config"
+	usageAgentConfig      = "$ld:ai:usage:agent-config"
+	usageAgentConfigs     = "$ld:ai:usage:agent-configs"
 )
+
+// modeAgent is the AI Config mode expected by AgentConfig and AgentConfigs.
+const modeAgent = "agent"
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
 // loggers to log warnings and errors.
@@ -89,6 +94,22 @@ func (c *Client) logConfigWarning(key string, format string, args ...interface{}
 	c.logger.Warnf(prefix+format, args...)
 }
 
+// trackConfigUsage emits the usage metric for a single-config retrieval (completion, judge, or
+// agent). The metric value is always 1 and the payload carries the config key.
+func (c *Client) trackConfigUsage(eventName, key string, context ldcontext.Context) {
+	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
+	_ = c.sdk.TrackMetric(eventName, context, 1, data)
+}
+
+// resolveMode returns the effective mode, preferring the metadata mode over the top-level field. An
+// empty result means the mode is unspecified.
+func resolveMode(metaMode, topMode string) string {
+	if metaMode != "" {
+		return metaMode
+	}
+	return topMode
+}
+
 // CompletionConfig retrieves an AI Config and interpolates its message templates using the provided
 // variables. Returns the default value if the config cannot be evaluated. Template interpolation is
 // not applied to the default value's messages.
@@ -100,9 +121,8 @@ func (c *Client) CompletionConfig(
 	defaultValue Config,
 	variables map[string]interface{},
 ) Config {
-	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
-	_ = c.sdk.TrackMetric(usageCompletionConfig, context, 1, data)
-	return c.evaluateConfig(key, context, defaultValue, variables)
+	c.trackConfigUsage(usageCompletionConfig, key, context)
+	return c.evaluateConfig(key, context, defaultValue, variables, "")
 }
 
 // CreateTracker reconstructs a Tracker from a resumption token and the given context.
@@ -111,8 +131,9 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 	return TrackerFromResumptionToken(token, c.sdk, context)
 }
 
-// returnDefault sets a tracker factory on a copy of def (so CreateTracker always works) and
-// returns the resulting Config. Used for all error-path returns in evaluateConfig.
+// returnDefault sets a tracker factory on a copy of def (so CreateTracker always works) and returns
+// the resulting Config verbatim. Used by evaluateConfig when the served value cannot be parsed or
+// interpolated at all; the ordinary failure path interpolates the default instead.
 func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
 	def.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger)
@@ -120,20 +141,25 @@ func (c *Client) returnDefault(key string, context ldcontext.Context, def Config
 	return def
 }
 
-// evaluateConfig fetches and interpolates an AI Config without emitting any metric.
-// Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
+// evaluateConfig fetches and interpolates an AI Config without emitting any metric. Callers
+// (CompletionConfig, JudgeConfig, agentConfig) are meant to emit their own usage metric before
+// calling this; the batch agentConfigs path intentionally emits a single aggregate metric instead.
+//
+// When expectedMode is non-empty, a successfully retrieved config whose mode does not match is
+// rejected and replaced with a disabled config. A caller's default is interpolated like a served
+// config but is never mode-validated.
 func (c *Client) evaluateConfig(
 	key string,
 	context ldcontext.Context,
 	defaultValue Config,
 	variables map[string]interface{},
+	expectedMode string,
 ) Config {
 	result, err := c.sdk.JSONVariation(key, context, defaultValue.AsLdValue())
-	if err != nil {
-		// The evaluation failed (e.g. flag not found, client not initialized), so the SDK returned the
-		// default value. Return it as-is: interpolation is not applied to the default value's messages.
-		return c.returnDefault(key, context, defaultValue)
-	}
+	// On evaluation failure (e.g. flag not found, client not initialized) the SDK returns the
+	// serialized default in result. The default is parsed and interpolated just like a served config
+	// (matching the Python SDK), but is never mode-validated.
+	isDefault := err != nil
 
 	// The spec requires the config to at least be an object (although all properties are optional, so it may be an
 	// empty object.)
@@ -142,10 +168,19 @@ func (c *Client) evaluateConfig(
 		return c.returnDefault(key, context, defaultValue)
 	}
 
-	var parsed datamodel.Config
-	if err := json.Unmarshal(result.AsRaw(), &parsed); err != nil {
-		c.logConfigWarning(key, "unmarshalling failed: %v", err)
-		return c.returnDefault(key, context, defaultValue)
+	// Each field is parsed independently from the served value (mirroring the Python SDK): a
+	// structurally malformed field is skipped rather than discarding the whole config.
+	meta := parseMeta(result.GetByKey("_ldMeta"))
+	topMode := result.GetByKey("mode").StringValue()
+
+	// Mode validation: a config retrieved with an expected mode (e.g. AgentConfig expects "agent")
+	// must match. An unspecified mode in the payload is not a mismatch (covers legacy payloads). This
+	// runs only on served configs; a caller's default is never rejected for its mode.
+	if servedMode := resolveMode(meta.Mode, topMode); !isDefault && expectedMode != "" &&
+		servedMode != "" && servedMode != expectedMode {
+		c.logConfigWarning(key, "mode mismatch: expected %q but the config is %q; returning a disabled config",
+			expectedMode, servedMode)
+		return c.disabledModeMismatch(key, context, meta, expectedMode)
 	}
 
 	mergedVariables := map[string]interface{}{
@@ -160,37 +195,66 @@ func (c *Client) evaluateConfig(
 		mergedVariables[k] = v
 	}
 
+	// Enabled is not set on the builder here: the full metadata (including Enabled) is assigned from
+	// meta after Build below, which would otherwise overwrite it.
+	modelVal := result.GetByKey("model")
 	builder := NewConfig().
-		WithModelName(parsed.Model.Name).
-		WithProviderName(parsed.Provider.Name).
-		WithEnabled(parsed.Meta.Enabled).
-		WithMode(parsed.Mode).
-		WithEvaluationMetricKey(parsed.EvaluationMetricKey).
-		WithEvaluationMetricKeys(parsed.EvaluationMetricKeys).
-		WithJudgeConfiguration(parsed.JudgeConfiguration)
+		WithModelName(modelVal.GetByKey("name").StringValue()).
+		WithProviderName(result.GetByKey("provider").GetByKey("name").StringValue()).
+		WithMode(topMode).
+		WithEvaluationMetricKey(result.GetByKey("evaluationMetricKey").StringValue()).
+		WithEvaluationMetricKeys(parseStringArray(result.GetByKey("evaluationMetricKeys"))).
+		WithJudgeConfiguration(parseJudgeConfiguration(result.GetByKey("judgeConfiguration")))
 
-	for k, v := range parsed.Model.Parameters {
-		builder.WithModelParam(k, v)
+	if params := modelVal.GetByKey("parameters"); params.Type() == ldvalue.ObjectType {
+		for _, k := range params.Keys(nil) {
+			builder.WithModelParam(k, params.GetByKey(k))
+		}
 	}
 
-	for k, v := range parsed.Model.Custom {
-		builder.WithCustomModelParam(k, v)
+	if custom := modelVal.GetByKey("custom"); custom.Type() == ldvalue.ObjectType {
+		for _, k := range custom.Keys(nil) {
+			builder.WithCustomModelParam(k, custom.GetByKey(k))
+		}
 	}
 
-	for i, msg := range parsed.Messages {
-		content, err := interpolateTemplate(msg.Content, mergedVariables)
+	// Messages are used only when "messages" is an array whose every entry is an object; otherwise
+	// all messages are dropped (matching the Python SDK) while the rest of the config is still served.
+	if messagesVal := result.GetByKey("messages"); messagesVal.Type() == ldvalue.ArrayType {
+		if allObjects(messagesVal) {
+			for i := 0; i < messagesVal.Count(); i++ {
+				entry := messagesVal.GetByIndex(i)
+				content, err := interpolateTemplate(entry.GetByKey("content").StringValue(), mergedVariables)
+				if err != nil {
+					c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
+					return c.returnDefault(key, context, defaultValue)
+				}
+				builder.WithMessage(content, datamodel.Role(entry.GetByKey("role").StringValue()))
+			}
+		} else {
+			c.logConfigWarning(key, "skipping messages: every entry must be an object")
+		}
+	} else if messagesVal.Type() != ldvalue.NullType {
+		c.logConfigWarning(key, "skipping messages: expected an array")
+	}
+
+	if instructionsVal := result.GetByKey("instructions"); instructionsVal.Type() == ldvalue.StringType {
+		instructions, err := interpolateTemplate(instructionsVal.StringValue(), mergedVariables)
 		if err != nil {
-			c.logConfigWarning(key,
-				"malformed message at index %d: %v", i, err,
-			)
+			c.logConfigWarning(key, "malformed instructions: %v", err)
 			return c.returnDefault(key, context, defaultValue)
 		}
-		builder.WithMessage(content, msg.Role)
+		builder.WithInstructions(instructions)
+	}
+
+	if tools := c.resolveTools(key, result); tools != nil {
+		builder.WithTools(tools)
 	}
 
 	cfg := builder.Build()
-	cfg.c.Meta.VariationKey = parsed.Meta.VariationKey
-	cfg.c.Meta.Version = parsed.Meta.Version
+	// Apply the served metadata wholesale so all fields (variationKey, version, enabled, mode, and
+	// any future additions) are preserved without per-field threading.
+	cfg.c.Meta = meta
 
 	cfg.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
@@ -271,8 +335,7 @@ func (c *Client) JudgeConfig(
 	defaultValue Config,
 	variables map[string]interface{},
 ) Config {
-	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
-	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
+	c.trackConfigUsage(usageJudgeConfig, key, context)
 
 	// Extend variables with reserved judge placeholders
 	extendedVariables := make(map[string]interface{})
@@ -290,5 +353,222 @@ func (c *Client) JudgeConfig(
 	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
 	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
 
-	return c.evaluateConfig(key, context, defaultValue, extendedVariables)
+	return c.evaluateConfig(key, context, defaultValue, extendedVariables, "")
+}
+
+// resolveTools extracts the tools from a served config value, mirroring the Python SDK's
+// _resolve_tools. A present top-level "tools" object is authoritative (even when empty): each entry
+// becomes a tool whose name defaults to its key, and non-object entries are skipped with a warning.
+// Only when no top-level "tools" key exists does it fall back to the model parameters' tools array,
+// where each entry must carry a name. Returns nil when the config defines no tools.
+func (c *Client) resolveTools(key string, served ldvalue.Value) map[string]datamodel.Tool {
+	if toolsVal, ok := served.TryGetByKey("tools"); ok {
+		if toolsVal.Type() != ldvalue.ObjectType {
+			return nil
+		}
+		tools := make(map[string]datamodel.Tool)
+		for _, name := range toolsVal.Keys(nil) {
+			item := toolsVal.GetByKey(name)
+			if item.Type() != ldvalue.ObjectType {
+				c.logConfigWarning(key, "skipping tool %q: expected an object", name)
+				continue
+			}
+			tools[name] = toolFromValue(item, name)
+		}
+		return emptyToNil(tools)
+	}
+
+	raw := served.GetByKey("model").GetByKey("parameters").GetByKey("tools")
+	if raw.Type() != ldvalue.ArrayType {
+		return nil
+	}
+	tools := make(map[string]datamodel.Tool)
+	for i := 0; i < raw.Count(); i++ {
+		item := raw.GetByIndex(i)
+		if item.Type() != ldvalue.ObjectType {
+			c.logConfigWarning(key, "skipping tool entry at index %d: expected an object", i)
+			continue
+		}
+		name := item.GetByKey("name").StringValue()
+		if name == "" {
+			c.logConfigWarning(key, "skipping tool entry at index %d: missing name", i)
+			continue
+		}
+		tools[name] = toolFromValue(item, name)
+	}
+	return emptyToNil(tools)
+}
+
+// toolFromValue builds a Tool from a config value, defaulting the name to fallbackName when the
+// entry has no explicit name (as the top-level tools map keys its entries by name).
+func toolFromValue(item ldvalue.Value, fallbackName string) datamodel.Tool {
+	name := fallbackName
+	if explicit := item.GetByKey("name").StringValue(); explicit != "" {
+		name = explicit
+	}
+	return datamodel.Tool{
+		Name:             name,
+		Description:      item.GetByKey("description").StringValue(),
+		Type:             item.GetByKey("type").StringValue(),
+		Parameters:       item.GetByKey("parameters"),
+		CustomParameters: item.GetByKey("customParameters"),
+	}
+}
+
+// emptyToNil returns nil for an empty tools map so callers can treat "no tools" uniformly (parity
+// with the Python SDK's `tools or None`).
+func emptyToNil(tools map[string]datamodel.Tool) map[string]datamodel.Tool {
+	if len(tools) == 0 {
+		return nil
+	}
+	return tools
+}
+
+// parseMeta reads the config metadata from the _ldMeta value. The version pointer is set only when
+// a numeric version is present, so an absent version defaults to 1 via Config.Version.
+func parseMeta(metaVal ldvalue.Value) datamodel.Meta {
+	meta := datamodel.Meta{
+		VariationKey: metaVal.GetByKey("variationKey").StringValue(),
+		Enabled:      metaVal.GetByKey("enabled").BoolValue(),
+		Mode:         metaVal.GetByKey("mode").StringValue(),
+	}
+	if v, ok := metaVal.TryGetByKey("version"); ok && v.Type() == ldvalue.NumberType {
+		n := v.IntValue()
+		meta.Version = &n
+	}
+	return meta
+}
+
+// parseStringArray returns the string entries of an array value, skipping non-strings. A non-array
+// value yields nil.
+func parseStringArray(arr ldvalue.Value) []string {
+	if arr.Type() != ldvalue.ArrayType {
+		return nil
+	}
+	var out []string
+	for i := 0; i < arr.Count(); i++ {
+		if item := arr.GetByIndex(i); item.Type() == ldvalue.StringType {
+			out = append(out, item.StringValue())
+		}
+	}
+	return out
+}
+
+// parseJudgeConfiguration reads the judge configuration, skipping judge entries that are not objects
+// or whose key is not a string or sampling rate is not a number (rather than silently coercing them
+// to "" / 0). Returns nil when no valid judges are defined.
+func parseJudgeConfiguration(jcVal ldvalue.Value) *datamodel.JudgeConfiguration {
+	judgesVal := jcVal.GetByKey("judges")
+	if jcVal.Type() != ldvalue.ObjectType || judgesVal.Type() != ldvalue.ArrayType {
+		return nil
+	}
+	var judges []datamodel.Judge
+	for i := 0; i < judgesVal.Count(); i++ {
+		j := judgesVal.GetByIndex(i)
+		key := j.GetByKey("key")
+		rate := j.GetByKey("samplingRate")
+		if j.Type() != ldvalue.ObjectType || key.Type() != ldvalue.StringType || rate.Type() != ldvalue.NumberType {
+			continue
+		}
+		judges = append(judges, datamodel.Judge{Key: key.StringValue(), SamplingRate: rate.Float64Value()})
+	}
+	if len(judges) == 0 {
+		return nil
+	}
+	return &datamodel.JudgeConfiguration{Judges: judges}
+}
+
+// allObjects reports whether every entry of an array value is a JSON object.
+func allObjects(arr ldvalue.Value) bool {
+	for i := 0; i < arr.Count(); i++ {
+		if arr.GetByIndex(i).Type() != ldvalue.ObjectType {
+			return false
+		}
+	}
+	return true
+}
+
+// AgentConfigRequest describes one agent configuration to retrieve via AgentConfigs.
+type AgentConfigRequest struct {
+	// Key is the agent configuration key.
+	Key string
+
+	// DefaultValue is returned when the configuration cannot be evaluated.
+	DefaultValue Config
+
+	// Variables are used to interpolate the agent's instruction template.
+	Variables map[string]interface{}
+}
+
+// AgentConfig retrieves an agent AI Config and interpolates its instruction template using the
+// provided variables. Returns the default value if the config cannot be evaluated, and a disabled
+// config if the retrieved config's mode is not "agent". The ctx parameter is accepted per the Go
+// SDK convention for new methods; evaluation itself does not block.
+//
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned Config to obtain a Tracker.
+func (c *Client) AgentConfig(
+	ctx context.Context,
+	key string,
+	ldctx ldcontext.Context,
+	defaultValue Config,
+	variables map[string]interface{},
+) Config {
+	c.trackConfigUsage(usageAgentConfig, key, ldctx)
+	return c.agentConfig(ctx, key, ldctx, defaultValue, variables)
+}
+
+// AgentConfigs retrieves multiple agent AI Configs, each with its own default value and
+// interpolation variables, and returns a map from each request's key to its configuration. A single
+// aggregate usage metric is emitted for the batch. ctx cancellation causes remaining evaluations to
+// return their defaults. If two requests share a key, the later one wins (matching the Python SDK).
+func (c *Client) AgentConfigs(
+	ctx context.Context,
+	requests []AgentConfigRequest,
+	ldctx ldcontext.Context,
+) map[string]Config {
+	count := len(requests)
+	data := ldvalue.ObjectBuild().Set("count", ldvalue.Int(count)).Build()
+	_ = c.sdk.TrackMetric(usageAgentConfigs, ldctx, float64(count), data)
+
+	agents := make(map[string]Config, count)
+	for _, req := range requests {
+		agents[req.Key] = c.agentConfig(ctx, req.Key, ldctx, req.DefaultValue, req.Variables)
+	}
+	return agents
+}
+
+// agentConfig evaluates a single agent config without emitting a usage metric. Mode validation
+// happens inside evaluateConfig, which returns a disabled config on a mismatch.
+func (c *Client) agentConfig(
+	ctx context.Context,
+	key string,
+	ldctx ldcontext.Context,
+	defaultValue Config,
+	variables map[string]interface{},
+) Config {
+	if ctx.Err() != nil {
+		c.logConfigWarning(key, "context done before evaluation: %v", ctx.Err())
+		return c.returnDefault(key, ldctx, defaultValue)
+	}
+	return c.evaluateConfig(key, ldctx, defaultValue, variables, modeAgent)
+}
+
+// disabledModeMismatch returns a disabled Config used when a served config's mode does not match
+// the mode expected by the retrieval method. It preserves the served metadata (variationKey,
+// version) for tracking, stamps the expected mode, and drops all config content so the rejected
+// messages/instructions/tools cannot leak through the returned config or its tracker.
+func (c *Client) disabledModeMismatch(
+	key string,
+	context ldcontext.Context,
+	servedMeta datamodel.Meta,
+	expectedMode string,
+) Config {
+	meta := servedMeta
+	meta.Enabled = false
+	meta.Mode = expectedMode
+	cfg := Config{c: datamodel.Config{Mode: expectedMode, Meta: meta}}
+	cfg.trackerFactory = func() *Tracker {
+		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
+	}
+	return cfg
 }

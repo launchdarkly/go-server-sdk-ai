@@ -16,6 +16,10 @@ type Meta struct {
 
 	// Version is the version of the Variation.
 	Version *int `json:"version,omitempty"`
+
+	// Mode is the AI Config mode (e.g., "completion", "agent", "judge") as reported in the
+	// config metadata.
+	Mode string `json:"mode,omitempty"`
 }
 
 // Model defines the serialization format for a model.
@@ -83,8 +87,33 @@ type Config struct {
 	// Use EvaluationMetricKey instead.
 	EvaluationMetricKeys []string `json:"evaluationMetricKeys,omitempty"`
 
+	// Instructions is the agent instruction template for agent mode configs. The instructions
+	// received from LaunchDarkly are uninterpolated.
+	Instructions string `json:"instructions,omitempty"`
+
+	// Tools are the tools available to the model or agent, keyed by tool name.
+	Tools map[string]Tool `json:"tools,omitempty"`
+
 	// JudgeConfiguration specifies judges attached to this config.
 	JudgeConfiguration *JudgeConfiguration `json:"judgeConfiguration,omitempty"`
+}
+
+// Tool defines the serialization format for a single tool entry in an AI Config.
+type Tool struct {
+	// Name identifies the tool. When tools are keyed by name, this defaults to the key.
+	Name string `json:"name,omitempty"`
+
+	// Description describes the tool's purpose to the model.
+	Description string `json:"description,omitempty"`
+
+	// Type is the tool type.
+	Type string `json:"type,omitempty"`
+
+	// Parameters is the tool's parameter schema.
+	Parameters ldvalue.Value `json:"parameters,omitempty"`
+
+	// CustomParameters are additional parameters not recognized by LaunchDarkly.
+	CustomParameters ldvalue.Value `json:"customParameters,omitempty"`
 }
 
 // JudgeConfiguration defines the configuration for judges attached to a config.

@@ -61,9 +61,23 @@ func (c *Config) CustomModelParam(key string) (ldvalue.Value, bool) {
 	return val, ok
 }
 
-// Mode returns the AI Config mode (e.g., "completion", "agent", "judge").
+// Instructions returns the agent instructions for agent mode configs, interpolated when the
+// config was retrieved via the Client.
+func (c *Config) Instructions() string {
+	return c.c.Instructions
+}
+
+// Tools returns the tools available to the model or agent, keyed by tool name. Returns a copy to
+// prevent mutations.
+func (c *Config) Tools() map[string]datamodel.Tool {
+	return maps.Clone(c.c.Tools)
+}
+
+// Mode returns the AI Config mode (e.g., "completion", "agent", "judge"). The mode reported in the
+// config metadata is preferred over the top-level field; an empty result means the mode is
+// unspecified (e.g., a default value or a legacy payload).
 func (c *Config) Mode() string {
-	return c.c.Mode
+	return resolveMode(c.c.Meta.Mode, c.c.Mode)
 }
 
 // EvaluationMetricKey returns the evaluation metric key for judge mode configs.
@@ -111,6 +125,8 @@ type ConfigBuilder struct {
 	modelParams          map[string]ldvalue.Value
 	modelCustomParams    map[string]ldvalue.Value
 	mode                 string
+	instructions         string
+	tools                map[string]datamodel.Tool
 	evaluationMetricKey  string
 	evaluationMetricKeys []string
 	judgeConfiguration   *datamodel.JudgeConfiguration
@@ -187,6 +203,19 @@ func (cb *ConfigBuilder) WithMode(mode string) *ConfigBuilder {
 	return cb
 }
 
+// WithInstructions sets the agent instructions for agent mode configs.
+func (cb *ConfigBuilder) WithInstructions(instructions string) *ConfigBuilder {
+	cb.instructions = instructions
+	return cb
+}
+
+// WithTools sets the tools available to the model or agent, keyed by tool name. The provided map
+// is defensively copied.
+func (cb *ConfigBuilder) WithTools(tools map[string]datamodel.Tool) *ConfigBuilder {
+	cb.tools = maps.Clone(tools)
+	return cb
+}
+
 // WithEvaluationMetricKey sets the evaluation metric key for judge mode configs.
 func (cb *ConfigBuilder) WithEvaluationMetricKey(key string) *ConfigBuilder {
 	cb.evaluationMetricKey = key
@@ -224,6 +253,8 @@ func (cb *ConfigBuilder) Build() Config {
 				Name: cb.providerName,
 			},
 			Mode:                 cb.mode,
+			Instructions:         cb.instructions,
+			Tools:                maps.Clone(cb.tools),
 			EvaluationMetricKey:  cb.evaluationMetricKey,
 			EvaluationMetricKeys: slices.Clone(cb.evaluationMetricKeys),
 			JudgeConfiguration:   cb.judgeConfiguration.Clone(),

@@ -94,13 +94,15 @@ func TestEvalErrorReturnsDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	// The literal {{x}} must survive: interpolation is not applied to the default value's messages.
-	defaultVal := NewConfig().Enable().WithMessage("hello {{x}}", datamodel.User).Build()
+	// The default value is interpolated like a served config (matching the Python SDK): {{x}} is
+	// rendered (to empty, since no variable is supplied).
+	defaultVal := NewConfig().Enable().WithMessage("hello {{x}}", datamodel.User).
+		WithModelName("gpt-4").WithProviderName("openai").Build()
 
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
 	assert.NotNil(t, cfg.CreateTracker())
 	assert.Equal(t, defaultVal.Enabled(), cfg.Enabled())
-	assert.Equal(t, defaultVal.Messages(), cfg.Messages())
+	assert.Equal(t, "hello ", cfg.Messages()[0].Content)
 	assert.Equal(t, defaultVal.ModelName(), cfg.ModelName())
 	assert.Equal(t, defaultVal.ProviderName(), cfg.ProviderName())
 }
