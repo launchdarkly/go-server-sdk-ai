@@ -117,22 +117,19 @@ func TestTracker_TrackRequest(t *testing.T) {
 	config := &Config{}
 	tracker := newTracker(events, newRunID(), "key", "variationKey", 3, ldcontext.New("key"), config, nil)
 
-	expectedResponse := ProviderResponse{
-		Usage: TokenUsage{
-			Total: 1,
-		},
-		Metrics: Metrics{
-			Latency:          10 * time.Millisecond,
-			TimeToFirstToken: 42 * time.Millisecond,
-		},
+	expectedMetrics := AIMetrics{
+		Success:          true,
+		Tokens:           TokenUsage{Total: 1},
+		Duration:         10 * time.Millisecond,
+		TimeToFirstToken: 42 * time.Millisecond,
 	}
 
-	r, err := tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
-		return expectedResponse, nil
+	r, err := tracker.TrackRequest(func(c *Config) (AIMetrics, error) {
+		return expectedMetrics, nil
 	})
 
 	assert.NoError(t, err)
-	assert.Equal(t, expectedResponse, r)
+	assert.Equal(t, expectedMetrics, r)
 
 	runId := extractRunId(t, events)
 	expectedEvents := []trackEvent{
@@ -180,9 +177,9 @@ func TestTracker_TrackRequestReceivesConfig(t *testing.T) {
 	tracker := newTracker(events, newRunID(), "key", "variationKey", 4, ldcontext.New("key"), &expectedConfig, nil)
 
 	var gotConfig *Config
-	_, _ = tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
+	_, _ = tracker.TrackRequest(func(c *Config) (AIMetrics, error) {
 		gotConfig = c
-		return ProviderResponse{}, nil
+		return AIMetrics{Success: true}, nil
 	})
 
 	assert.Equal(t, expectedConfig, *gotConfig)
@@ -203,18 +200,17 @@ func TestTracker_LatencyMeasuredIfNotProvided(t *testing.T) {
 	tracker := newTrackerWithStopwatch(
 		events, newRunID(), "key", "variationKey", 5, ldcontext.New("key"), config, nil, mockStopwatch(42*time.Millisecond))
 
-	expectedResponse := ProviderResponse{
-		Usage: TokenUsage{
-			Total: 1,
-		},
+	expectedMetrics := AIMetrics{
+		Success: true,
+		Tokens:  TokenUsage{Total: 1},
 	}
 
-	r, err := tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
-		return expectedResponse, nil
+	r, err := tracker.TrackRequest(func(c *Config) (AIMetrics, error) {
+		return expectedMetrics, nil
 	})
 
 	assert.NoError(t, err)
-	assert.Equal(t, expectedResponse, r)
+	assert.Equal(t, expectedMetrics, r)
 
 	require.Equal(t, 3, len(events.events))
 	gotEvent := events.events[0]
@@ -230,12 +226,12 @@ func TestTracker_TrackRequestErrorTracksDurationAndError(t *testing.T) {
 		mockStopwatch(42*time.Millisecond))
 
 	taskErr := errors.New("provider unavailable")
-	response, err := tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
-		return ProviderResponse{Usage: TokenUsage{Total: 99}}, taskErr
+	response, err := tracker.TrackRequest(func(c *Config) (AIMetrics, error) {
+		return AIMetrics{Tokens: TokenUsage{Total: 99}}, taskErr
 	})
 
 	assert.ErrorIs(t, err, taskErr)
-	assert.Equal(t, ProviderResponse{}, response, "a failed request returns a zero response")
+	assert.Equal(t, AIMetrics{}, response, "a failed request returns zero metrics")
 	assert.Equal(t, []string{"$ld:ai:duration:total", "$ld:ai:generation:error"}, eventNames(events),
 		"failed requests record their duration, matching the other AI SDKs")
 	assert.Equal(t, 42.0, events.events[0].metricValue)
@@ -803,6 +799,26 @@ func TestTracker_GetSummaryToolCallsIsCopied(t *testing.T) {
 		"mutating the returned slice must not affect the tracker")
 }
 
+func TestTokenUsage_Set(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage TokenUsage
+		want  bool
+	}{
+		{"zero value", TokenUsage{}, false},
+		{"total only", TokenUsage{Total: 1}, true},
+		{"input only", TokenUsage{Input: 1}, true},
+		{"output only", TokenUsage{Output: 1}, true},
+		{"all fields", TokenUsage{Total: 3, Input: 1, Output: 2}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.usage.Set())
+		})
+	}
+}
+
 // failingSink records events like mockEvents but reports a delivery failure for every event.
 type failingSink struct {
 	inner *mockEvents
@@ -821,10 +837,10 @@ func TestTracker_TrackToolCallsSinkFailure(t *testing.T) {
 
 	err := tracker.TrackToolCalls([]string{"a", "b"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "error tracking tool calls")
+	assert.Contains(t, err.Error(), `tool call "a"`)
+	assert.Contains(t, err.Error(), `tool call "b"`)
 	assert.Equal(t, []string{"a", "b"}, tracker.GetSummary().ToolCalls,
 		"tool calls are recorded in the summary even when event delivery fails")
-	events.log.AssertMessageMatch(t, true, ldlog.Warn, `error tracking tool call "a"`)
 }
 
 func TestTrackMetricsOf_SinkFailureLogsAndContinues(t *testing.T) {
@@ -847,6 +863,8 @@ func TestTrackMetricsOf_SinkFailureLogsAndContinues(t *testing.T) {
 	assert.Equal(t, "ok", result)
 	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking duration metric")
 	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking success metric")
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking token usage metric")
+	events.log.AssertMessageMatch(t, true, ldlog.Warn, "error tracking tool calls metric")
 }
 
 func TestTrackMetricsOf_TaskErrorSinkFailureLogs(t *testing.T) {

@@ -7,26 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTokenUsage_Set(t *testing.T) {
-	tests := []struct {
-		name  string
-		usage TokenUsage
-		want  bool
-	}{
-		{"zero value", TokenUsage{}, false},
-		{"total only", TokenUsage{Total: 1}, true},
-		{"input only", TokenUsage{Input: 1}, true},
-		{"output only", TokenUsage{Output: 1}, true},
-		{"all fields", TokenUsage{Total: 3, Input: 1, Output: 2}, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, tt.usage.Set())
-		})
-	}
-}
-
 func TestJudgeConfiguration_Clone_Nil(t *testing.T) {
 	var jc *JudgeConfiguration
 	assert.Nil(t, jc.Clone())

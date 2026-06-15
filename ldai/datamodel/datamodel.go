@@ -2,7 +2,6 @@ package datamodel
 
 import (
 	"slices"
-	"time"
 
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 )
@@ -109,49 +108,6 @@ type Judge struct {
 
 	// SamplingRate is the probability (0.0-1.0) that the judge will evaluate.
 	SamplingRate float64 `json:"samplingRate"`
-}
-
-// TokenUsage represents the token usage returned by a model provider for a specific request.
-// Unlike the other types in this package, it is not part of the AI Config JSON representation
-// and intentionally has no JSON tags.
-type TokenUsage struct {
-	// Total is the total number of tokens used.
-	Total int
-
-	// Input is the number of input tokens used.
-	Input int
-
-	// Output is the number of output tokens used.
-	Output int
-}
-
-// Set returns true if any of the fields are non-zero.
-func (t TokenUsage) Set() bool {
-	return t.Total > 0 || t.Input > 0 || t.Output > 0
-}
-
-// AIMetrics contains the metrics for a single AI operation. It mirrors the LDAIMetrics type in
-// the other LaunchDarkly AI SDKs. Like TokenUsage, it is not part of the AI Config JSON
-// representation and has no JSON tags.
-type AIMetrics struct {
-	// Success indicates whether the operation succeeded.
-	Success bool
-
-	// Tokens is the token usage for the operation. The zero value means usage was not reported;
-	// see TokenUsage.Set.
-	Tokens TokenUsage
-
-	// ToolCalls is the ordered list of tool keys invoked during the operation; empty or nil if
-	// none were observed.
-	ToolCalls []string
-
-	// Duration is the duration of the operation as reported by the provider. When zero, callers
-	// measuring wall-clock time use their own measurement instead.
-	Duration time.Duration
-
-	// TimeToFirstToken is the time to the first token of a streamed response, or zero if not
-	// measured.
-	TimeToFirstToken time.Duration
 }
 
 // EvalScore represents a single evaluation metric result.
