@@ -156,9 +156,8 @@ func (c *Client) evaluateConfig(
 	expectedMode string,
 ) Config {
 	result, err := c.sdk.JSONVariation(key, context, defaultValue.AsLdValue())
-	// On evaluation failure (e.g. flag not found, client not initialized) the SDK returns the
-	// serialized default in result. The default is parsed and interpolated just like a served config
-	// (matching the Python SDK), but is never mode-validated.
+	// On failure the SDK returns the serialized default in result; it is parsed like a served config
+	// but never mode-validated.
 	isDefault := err != nil
 
 	// The spec requires the config to at least be an object (although all properties are optional, so it may be an
@@ -168,14 +167,13 @@ func (c *Client) evaluateConfig(
 		return c.returnDefault(key, context, defaultValue)
 	}
 
-	// Each field is parsed independently from the served value (mirroring the Python SDK): a
-	// structurally malformed field is skipped rather than discarding the whole config.
+	// Each field is parsed independently from the served value, so a malformed field is skipped
+	// rather than discarding the whole config (matching the Python SDK).
 	meta := parseMeta(result.GetByKey("_ldMeta"))
 	topMode := result.GetByKey("mode").StringValue()
 
-	// Mode validation: a config retrieved with an expected mode (e.g. AgentConfig expects "agent")
-	// must match. An unspecified mode in the payload is not a mismatch (covers legacy payloads). This
-	// runs only on served configs; a caller's default is never rejected for its mode.
+	// An unspecified mode is not a mismatch (covers legacy payloads), and a caller's default is never
+	// rejected for its mode.
 	if servedMode := resolveMode(meta.Mode, topMode); !isDefault && expectedMode != "" &&
 		servedMode != "" && servedMode != expectedMode {
 		c.logConfigWarning(key, "mode mismatch: expected %q but the config is %q; returning a disabled config",
@@ -195,66 +193,34 @@ func (c *Client) evaluateConfig(
 		mergedVariables[k] = v
 	}
 
-	// Enabled is not set on the builder here: the full metadata (including Enabled) is assigned from
-	// meta after Build below, which would otherwise overwrite it.
+	messages, err := c.interpolateMessages(key, result.GetByKey("messages"), mergedVariables)
+	if err != nil {
+		return c.returnDefault(key, context, defaultValue)
+	}
+
+	instructions, err := c.interpolateInstructions(key, result.GetByKey("instructions"), mergedVariables)
+	if err != nil {
+		return c.returnDefault(key, context, defaultValue)
+	}
+
+	// Parsed values are freshly allocated and unaliased, so they are assigned without copying.
 	modelVal := result.GetByKey("model")
-	builder := NewConfig().
-		WithModelName(modelVal.GetByKey("name").StringValue()).
-		WithProviderName(result.GetByKey("provider").GetByKey("name").StringValue()).
-		WithMode(topMode).
-		WithEvaluationMetricKey(result.GetByKey("evaluationMetricKey").StringValue()).
-		WithEvaluationMetricKeys(parseStringArray(result.GetByKey("evaluationMetricKeys"))).
-		WithJudgeConfiguration(parseJudgeConfiguration(result.GetByKey("judgeConfiguration")))
-
-	if params := modelVal.GetByKey("parameters"); params.Type() == ldvalue.ObjectType {
-		for _, k := range params.Keys(nil) {
-			builder.WithModelParam(k, params.GetByKey(k))
-		}
-	}
-
-	if custom := modelVal.GetByKey("custom"); custom.Type() == ldvalue.ObjectType {
-		for _, k := range custom.Keys(nil) {
-			builder.WithCustomModelParam(k, custom.GetByKey(k))
-		}
-	}
-
-	// Messages are used only when "messages" is an array whose every entry is an object; otherwise
-	// all messages are dropped (matching the Python SDK) while the rest of the config is still served.
-	if messagesVal := result.GetByKey("messages"); messagesVal.Type() == ldvalue.ArrayType {
-		if allObjects(messagesVal) {
-			for i := 0; i < messagesVal.Count(); i++ {
-				entry := messagesVal.GetByIndex(i)
-				content, err := interpolateTemplate(entry.GetByKey("content").StringValue(), mergedVariables)
-				if err != nil {
-					c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
-					return c.returnDefault(key, context, defaultValue)
-				}
-				builder.WithMessage(content, datamodel.Role(entry.GetByKey("role").StringValue()))
-			}
-		} else {
-			c.logConfigWarning(key, "skipping messages: every entry must be an object")
-		}
-	} else if messagesVal.Type() != ldvalue.NullType {
-		c.logConfigWarning(key, "skipping messages: expected an array")
-	}
-
-	if instructionsVal := result.GetByKey("instructions"); instructionsVal.Type() == ldvalue.StringType {
-		instructions, err := interpolateTemplate(instructionsVal.StringValue(), mergedVariables)
-		if err != nil {
-			c.logConfigWarning(key, "malformed instructions: %v", err)
-			return c.returnDefault(key, context, defaultValue)
-		}
-		builder.WithInstructions(instructions)
-	}
-
-	if tools := c.resolveTools(key, result); tools != nil {
-		builder.WithTools(tools)
-	}
-
-	cfg := builder.Build()
-	// Apply the served metadata wholesale so all fields (variationKey, version, enabled, mode, and
-	// any future additions) are preserved without per-field threading.
-	cfg.c.Meta = meta
+	cfg := Config{c: datamodel.Config{
+		Meta: meta,
+		Mode: topMode,
+		Model: datamodel.Model{
+			Name:       modelVal.GetByKey("name").StringValue(),
+			Parameters: objectToValueMap(modelVal.GetByKey("parameters")),
+			Custom:     objectToValueMap(modelVal.GetByKey("custom")),
+		},
+		Provider:             datamodel.Provider{Name: result.GetByKey("provider").GetByKey("name").StringValue()},
+		Messages:             messages,
+		Instructions:         instructions,
+		Tools:                c.resolveTools(key, result),
+		EvaluationMetricKey:  result.GetByKey("evaluationMetricKey").StringValue(),
+		EvaluationMetricKeys: parseStringArray(result.GetByKey("evaluationMetricKeys")),
+		JudgeConfiguration:   parseJudgeConfiguration(result.GetByKey("judgeConfiguration")),
+	}}
 
 	cfg.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
@@ -476,6 +442,69 @@ func parseJudgeConfiguration(jcVal ldvalue.Value) *datamodel.JudgeConfiguration 
 		return nil
 	}
 	return &datamodel.JudgeConfiguration{Judges: judges}
+}
+
+// objectToValueMap returns a copy of an object value as a map, or nil when the value is not an
+// object.
+func objectToValueMap(v ldvalue.Value) map[string]ldvalue.Value {
+	if v.Type() != ldvalue.ObjectType {
+		return nil
+	}
+	return v.AsValueMap().AsMap()
+}
+
+// interpolateMessages returns the messages with their content templates interpolated, used only when
+// messagesVal is an array whose every entry is an object (otherwise they are dropped with a warning,
+// matching the Python SDK). A non-nil error means a template was malformed and the caller should
+// return the default.
+func (c *Client) interpolateMessages(
+	key string,
+	messagesVal ldvalue.Value,
+	variables map[string]interface{},
+) ([]datamodel.Message, error) {
+	if messagesVal.Type() != ldvalue.ArrayType {
+		if messagesVal.Type() != ldvalue.NullType {
+			c.logConfigWarning(key, "skipping messages: expected an array")
+		}
+		return nil, nil
+	}
+	if !allObjects(messagesVal) {
+		c.logConfigWarning(key, "skipping messages: every entry must be an object")
+		return nil, nil
+	}
+	var messages []datamodel.Message
+	for i := 0; i < messagesVal.Count(); i++ {
+		entry := messagesVal.GetByIndex(i)
+		content, err := interpolateTemplate(entry.GetByKey("content").StringValue(), variables)
+		if err != nil {
+			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
+			return nil, err
+		}
+		messages = append(messages, datamodel.Message{
+			Content: content,
+			Role:    datamodel.Role(entry.GetByKey("role").StringValue()),
+		})
+	}
+	return messages, nil
+}
+
+// interpolateInstructions returns the interpolated agent instructions, or "" when instructionsVal is
+// not a string. A non-nil error means the template was malformed and the caller should return the
+// default.
+func (c *Client) interpolateInstructions(
+	key string,
+	instructionsVal ldvalue.Value,
+	variables map[string]interface{},
+) (string, error) {
+	if instructionsVal.Type() != ldvalue.StringType {
+		return "", nil
+	}
+	instructions, err := interpolateTemplate(instructionsVal.StringValue(), variables)
+	if err != nil {
+		c.logConfigWarning(key, "malformed instructions: %v", err)
+		return "", err
+	}
+	return instructions, nil
 }
 
 // allObjects reports whether every entry of an array value is a JSON object.
