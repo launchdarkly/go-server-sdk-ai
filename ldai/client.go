@@ -168,7 +168,7 @@ func (c *Client) evaluateConfig(
 	}
 
 	// Each field is parsed independently from the served value, so a malformed field is skipped
-	// rather than discarding the whole config (matching the Python SDK).
+	// rather than discarding the whole config.
 	meta := parseMeta(result.GetByKey("_ldMeta"))
 	topMode := result.GetByKey("mode").StringValue()
 
