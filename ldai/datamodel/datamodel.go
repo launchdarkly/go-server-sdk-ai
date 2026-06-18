@@ -77,9 +77,6 @@ type Config struct {
 	// Provider is the provider.
 	Provider Provider `json:"provider,omitempty"`
 
-	// Mode is the AI Config mode (e.g., "completion", "agent", "judge").
-	Mode string `json:"mode,omitempty"`
-
 	// EvaluationMetricKey is the evaluation metric key for judge mode configs.
 	EvaluationMetricKey string `json:"evaluationMetricKey,omitempty"`
 

@@ -16,7 +16,6 @@ import (
 func TestAgentConfig_Basic(t *testing.T) {
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "v1", "enabled": true, "version": 3, "mode": "agent"},
-		"mode": "agent",
 		"model": {"name": "gpt-4"},
 		"provider": {"name": "openai"},
 		"instructions": "You are an agent helping {{ldctx.name}} with {{task}}.",
@@ -55,7 +54,7 @@ func TestAgentConfig_Basic(t *testing.T) {
 	assert.Equal(t, "my-agent", evt.data.GetByKey("configKey").StringValue())
 }
 
-func TestAgentConfig_ModeMismatchReturnsDisabled(t *testing.T) {
+func TestAgentConfig_ModeMismatchReturnsDefault(t *testing.T) {
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "v1", "enabled": true, "version": 2, "mode": "completion"},
 		"messages": [{"content": "hello", "role": "user"}]
@@ -65,44 +64,32 @@ func TestAgentConfig_ModeMismatchReturnsDisabled(t *testing.T) {
 	client, err := NewClient(mockSDK)
 	require.NoError(t, err)
 
-	cfg := client.AgentConfig(context.Background(), "key", ldcontext.New("user"), Disabled(), nil)
+	defaultVal := NewConfig().WithInstructions("fallback agent").Build()
+	cfg := client.AgentConfig(context.Background(), "key", ldcontext.New("user"), defaultVal, nil)
 
+	assert.Equal(t, "fallback agent", cfg.Instructions(), "a mode mismatch returns the caller's default")
+	assert.Empty(t, cfg.Messages(), "the mismatched config's content is not returned")
 	assert.False(t, cfg.Enabled())
-	assert.Empty(t, cfg.Messages(), "mode-mismatched config content must not leak through")
-	assert.Equal(t, modeAgent, cfg.Mode())
-	assert.Equal(t, "v1", cfg.VariationKey(), "metadata is preserved for tracking")
 	assert.NotNil(t, cfg.CreateTracker())
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "mode mismatch")
 }
 
-func TestAgentConfig_TopLevelModeFallback(t *testing.T) {
-	// Mode only at the top level (no _ldMeta.mode): still detected as a mismatch.
+func TestAgentConfig_UnspecifiedModeReturnsDefault(t *testing.T) {
+	// A config without a mode in _ldMeta is assumed to be "completion", so retrieving it as an agent
+	// is a mismatch and returns the caller's default.
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "v1", "enabled": true},
-		"mode": "judge"
+		"instructions": "You are an agent."
 	}`)
 
 	mockSDK := newMockSDK(json, nil)
 	client, err := NewClient(mockSDK)
 	require.NoError(t, err)
 
-	cfg := client.AgentConfig(context.Background(), "key", ldcontext.New("user"), Disabled(), nil)
-	assert.False(t, cfg.Enabled())
+	defaultVal := NewConfig().WithInstructions("fallback").Build()
+	cfg := client.AgentConfig(context.Background(), "key", ldcontext.New("user"), defaultVal, nil)
+	assert.Equal(t, "fallback", cfg.Instructions())
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "mode mismatch")
-}
-
-func TestAgentConfig_UnspecifiedModeIsAccepted(t *testing.T) {
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "v1", "enabled": true},
-		"instructions": "You are an agent."
-	}`)
-
-	client, err := NewClient(newMockSDK(json, nil))
-	require.NoError(t, err)
-
-	cfg := client.AgentConfig(context.Background(), "key", ldcontext.New("user"), Disabled(), nil)
-	assert.True(t, cfg.Enabled())
-	assert.Equal(t, "You are an agent.", cfg.Instructions())
 }
 
 func TestAgentConfig_EvalErrorReturnsDefault(t *testing.T) {
@@ -419,37 +406,6 @@ func TestAgentConfig_DefaultWithNonAgentModeIsNotValidated(t *testing.T) {
 	assert.True(t, cfg.Enabled(), "the default must be returned as-is, not replaced by a disabled config")
 	assert.Equal(t, "completion", cfg.Mode())
 	assert.Equal(t, "fallback", cfg.Instructions())
-}
-
-func TestAgentConfig_ModeMismatchDoesNotLeakViaTracker(t *testing.T) {
-	// A mode-mismatched config is returned disabled; the tracker it mints must also see the disabled
-	// config in its task callback, not the original (enabled, message-bearing) served config.
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "v1", "enabled": true, "version": 7, "mode": "completion"},
-		"messages": [{"content": "secret", "role": "user"}],
-		"model": {"name": "gpt-4"}
-	}`)
-
-	client, err := NewClient(newMockSDK(json, nil))
-	require.NoError(t, err)
-
-	cfg := client.AgentConfig(context.Background(), "key", ldcontext.New("user"), Disabled(), nil)
-	tracker := cfg.CreateTracker()
-	require.NotNil(t, tracker)
-
-	var sawEnabled bool
-	var sawMessages int
-	var sawModel string
-	_, _ = tracker.TrackRequest(func(c *Config) (ProviderResponse, error) {
-		sawEnabled = c.Enabled()
-		sawMessages = len(c.Messages())
-		sawModel = c.ModelName()
-		return ProviderResponse{}, nil
-	})
-
-	assert.False(t, sawEnabled, "tracker callback must not see the original enabled config")
-	assert.Zero(t, sawMessages, "tracker callback must not see the rejected config's messages")
-	assert.Empty(t, sawModel, "tracker callback must not see the rejected config's model")
 }
 
 func TestAgentConfig_ModeReportedFromMetadata(t *testing.T) {

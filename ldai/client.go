@@ -57,8 +57,12 @@ const (
 	usageAgentConfigs     = "$ld:ai:usage:agent-configs"
 )
 
-// modeAgent is the AI Config mode expected by AgentConfig and AgentConfigs.
-const modeAgent = "agent"
+// modeAgent is the AI Config mode expected by AgentConfig and AgentConfigs; modeCompletion is the
+// mode assumed for a config whose metadata does not specify one.
+const (
+	modeAgent      = "agent"
+	modeCompletion = "completion"
+)
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
 // loggers to log warnings and errors.
@@ -101,13 +105,14 @@ func (c *Client) trackConfigUsage(eventName, key string, context ldcontext.Conte
 	_ = c.sdk.TrackMetric(eventName, context, 1, data)
 }
 
-// resolveMode returns the effective mode, preferring the metadata mode over the top-level field. An
-// empty result means the mode is unspecified.
-func resolveMode(metaMode, topMode string) string {
-	if metaMode != "" {
-		return metaMode
+// effectiveMode returns a config's mode as reported in its metadata, defaulting to "completion" when
+// none is specified (matching the other LaunchDarkly AI SDKs). Mode is only ever carried in the
+// config metadata.
+func effectiveMode(metaMode string) string {
+	if metaMode == "" {
+		return modeCompletion
 	}
-	return topMode
+	return metaMode
 }
 
 // CompletionConfig retrieves an AI Config and interpolates its message templates using the provided
@@ -146,7 +151,7 @@ func (c *Client) returnDefault(key string, context ldcontext.Context, def Config
 // calling this; the batch agentConfigs path intentionally emits a single aggregate metric instead.
 //
 // When expectedMode is non-empty, a successfully retrieved config whose mode does not match is
-// rejected and replaced with a disabled config. A caller's default is interpolated like a served
+// rejected and the caller's default is returned. A caller's default is interpolated like a served
 // config but is never mode-validated.
 func (c *Client) evaluateConfig(
 	key string,
@@ -170,15 +175,15 @@ func (c *Client) evaluateConfig(
 	// Each field is parsed independently from the served value, so a malformed field is skipped
 	// rather than discarding the whole config.
 	meta := parseMeta(result.GetByKey("_ldMeta"))
-	topMode := result.GetByKey("mode").StringValue()
 
-	// An unspecified mode is not a mismatch (covers legacy payloads), and a caller's default is never
-	// rejected for its mode.
-	if servedMode := resolveMode(meta.Mode, topMode); !isDefault && expectedMode != "" &&
-		servedMode != "" && servedMode != expectedMode {
-		c.logConfigWarning(key, "mode mismatch: expected %q but the config is %q; returning a disabled config",
-			expectedMode, servedMode)
-		return c.disabledModeMismatch(key, context, meta, expectedMode)
+	// A config without a mode in its metadata is assumed to be "completion". The default returned on
+	// an eval failure (isDefault) is not mode-validated.
+	if !isDefault && expectedMode != "" {
+		if servedMode := effectiveMode(meta.Mode); servedMode != expectedMode {
+			c.logConfigWarning(key, "mode mismatch: expected %q but the config is %q; returning the default value",
+				expectedMode, servedMode)
+			return c.returnDefault(key, context, defaultValue)
+		}
 	}
 
 	mergedVariables := map[string]interface{}{
@@ -207,7 +212,6 @@ func (c *Client) evaluateConfig(
 	modelVal := result.GetByKey("model")
 	cfg := Config{c: datamodel.Config{
 		Meta: meta,
-		Mode: topMode,
 		Model: datamodel.Model{
 			Name:       modelVal.GetByKey("name").StringValue(),
 			Parameters: objectToValueMap(modelVal.GetByKey("parameters")),
@@ -567,7 +571,7 @@ func (c *Client) AgentConfigs(
 }
 
 // agentConfig evaluates a single agent config without emitting a usage metric. Mode validation
-// happens inside evaluateConfig, which returns a disabled config on a mismatch.
+// happens inside evaluateConfig, which returns the caller's default on a mismatch.
 func (c *Client) agentConfig(
 	ctx context.Context,
 	key string,
@@ -580,24 +584,4 @@ func (c *Client) agentConfig(
 		return c.returnDefault(key, ldctx, defaultValue)
 	}
 	return c.evaluateConfig(key, ldctx, defaultValue, variables, modeAgent)
-}
-
-// disabledModeMismatch returns a disabled Config used when a served config's mode does not match
-// the mode expected by the retrieval method. It preserves the served metadata (variationKey,
-// version) for tracking, stamps the expected mode, and drops all config content so the rejected
-// messages/instructions/tools cannot leak through the returned config or its tracker.
-func (c *Client) disabledModeMismatch(
-	key string,
-	context ldcontext.Context,
-	servedMeta datamodel.Meta,
-	expectedMode string,
-) Config {
-	meta := servedMeta
-	meta.Enabled = false
-	meta.Mode = expectedMode
-	cfg := Config{c: datamodel.Config{Mode: expectedMode, Meta: meta}}
-	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
-	}
-	return cfg
 }

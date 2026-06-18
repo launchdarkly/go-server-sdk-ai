@@ -73,11 +73,10 @@ func (c *Config) Tools() map[string]datamodel.Tool {
 	return maps.Clone(c.c.Tools)
 }
 
-// Mode returns the AI Config mode (e.g., "completion", "agent", "judge"). The mode reported in the
-// config metadata is preferred over the top-level field; an empty result means the mode is
-// unspecified (e.g., a default value or a legacy payload).
+// Mode returns the AI Config mode (e.g., "completion", "agent", "judge"). The mode comes from the
+// config metadata; a config that does not specify one is a "completion" config.
 func (c *Config) Mode() string {
-	return resolveMode(c.c.Meta.Mode, c.c.Mode)
+	return effectiveMode(c.c.Meta.Mode)
 }
 
 // EvaluationMetricKey returns the evaluation metric key for judge mode configs.
@@ -243,6 +242,7 @@ func (cb *ConfigBuilder) Build() Config {
 			Messages: slices.Clone(cb.messages),
 			Meta: datamodel.Meta{
 				Enabled: cb.enabled,
+				Mode:    cb.mode,
 			},
 			Model: datamodel.Model{
 				Name:       cb.modelName,
@@ -252,7 +252,6 @@ func (cb *ConfigBuilder) Build() Config {
 			Provider: datamodel.Provider{
 				Name: cb.providerName,
 			},
-			Mode:                 cb.mode,
 			Instructions:         cb.instructions,
 			Tools:                maps.Clone(cb.tools),
 			EvaluationMetricKey:  cb.evaluationMetricKey,
