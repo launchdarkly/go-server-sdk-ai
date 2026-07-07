@@ -28,7 +28,7 @@ func TestDatamodelRoundTrip_ToolsMapPreserved(t *testing.T) {
 			}
 		},
 		"model": {
-			"name": "gpt-4o",
+			"name": "my-model",
 			"parameters": {
 				"tools": [{"type": "function", "function": {"name": "search"}}]
 			}
@@ -167,7 +167,7 @@ func TestCompletionConfig_ModelParametersToolsArrayUntouched(t *testing.T) {
 	raw := []byte(`{
 		"_ldMeta": {"variationKey": "v1", "enabled": true},
 		"model": {
-			"name": "gpt-4o",
+			"name": "my-model",
 			"parameters": {
 				"tools": [{"type": "function", "function": {"name": "search"}}]
 			}
@@ -201,8 +201,8 @@ func TestCompletionConfig_KeyAccessor(t *testing.T) {
 func TestCompletionConfig_ModelAndProviderAccessors(t *testing.T) {
 	raw := []byte(`{
 		"_ldMeta": {"variationKey": "v1", "enabled": true},
-		"model": {"name": "gpt-4o", "parameters": {"temperature": 0.7}},
-		"provider": {"name": "openai"}
+		"model": {"name": "my-model", "parameters": {"temperature": 0.7}},
+		"provider": {"name": "my-provider"}
 	}`)
 
 	client, err := NewClient(newMockSDK(raw, nil))
@@ -211,11 +211,11 @@ func TestCompletionConfig_ModelAndProviderAccessors(t *testing.T) {
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 
 	m := cfg.Model()
-	assert.Equal(t, "gpt-4o", m.Name)
+	assert.Equal(t, "my-model", m.Name)
 	assert.Equal(t, ldvalue.Float64(0.7), m.Parameters["temperature"])
 
 	p := cfg.Provider()
-	assert.Equal(t, "openai", p.Name)
+	assert.Equal(t, "my-provider", p.Name)
 }
 
 func TestCompletionConfig_EvaluatorNeverNil(t *testing.T) {
@@ -256,8 +256,8 @@ func TestAICompletionConfigDefault_Disabled(t *testing.T) {
 
 func TestAICompletionConfigDefault_AsLdValueRoundTrip(t *testing.T) {
 	d := NewAICompletionConfigDefault().
-		WithModelName("gpt-4o").
-		WithProviderName("openai").
+		WithModelName("my-model").
+		WithProviderName("my-provider").
 		WithMessage("hello", datamodel.User)
 
 	v := d.AsLdValue()
@@ -265,8 +265,8 @@ func TestAICompletionConfigDefault_AsLdValueRoundTrip(t *testing.T) {
 
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
-	assert.Equal(t, "gpt-4o", dm.Model.Name)
-	assert.Equal(t, "openai", dm.Provider.Name)
+	assert.Equal(t, "my-model", dm.Model.Name)
+	assert.Equal(t, "my-provider", dm.Provider.Name)
 	require.Len(t, dm.Messages, 1)
 	assert.Equal(t, "hello", dm.Messages[0].Content)
 	assert.Equal(t, datamodel.User, dm.Messages[0].Role)
@@ -328,16 +328,16 @@ func TestConfig_TypeAliasIsAICompletionConfig(t *testing.T) {
 func TestConfigBuilder_BackwardCompatBuild(t *testing.T) {
 	cfg := NewConfig().
 		Enable().
-		WithModelName("gpt-4o").
-		WithProviderName("openai").
+		WithModelName("my-model").
+		WithProviderName("my-provider").
 		WithMessage("hi", datamodel.User).
 		WithModelParam("temperature", ldvalue.Float64(0.5)).
 		WithCustomModelParam("custom_key", ldvalue.String("val")).
 		Build()
 
 	assert.True(t, cfg.Enabled())
-	assert.Equal(t, "gpt-4o", cfg.ModelName())
-	assert.Equal(t, "openai", cfg.ProviderName())
+	assert.Equal(t, "my-model", cfg.ModelName())
+	assert.Equal(t, "my-provider", cfg.ProviderName())
 
 	p, ok := cfg.ModelParam("temperature")
 	require.True(t, ok)

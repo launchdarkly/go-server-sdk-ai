@@ -8,7 +8,7 @@ import (
 
 // ModelConfig holds the model name and associated parameters for an AI Config.
 type ModelConfig struct {
-	// Name identifies the model (e.g., "gpt-4o").
+	// Name identifies the model.
 	Name string
 
 	// Parameters are model parameters generally set by LaunchDarkly.
@@ -20,7 +20,7 @@ type ModelConfig struct {
 
 // ProviderConfig holds the provider name for an AI Config.
 type ProviderConfig struct {
-	// Name identifies the provider (e.g., "openai").
+	// Name identifies the provider.
 	Name string
 }
 
