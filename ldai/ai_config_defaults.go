@@ -136,6 +136,24 @@ func (d AIAgentConfigDefault) WithProviderName(name string) AIAgentConfigDefault
 	return d
 }
 
+// WithModelParam sets a model parameter.
+func (d AIAgentConfigDefault) WithModelParam(key string, value ldvalue.Value) AIAgentConfigDefault {
+	cloned := make(map[string]ldvalue.Value, len(d.modelParams)+1)
+	maps.Copy(cloned, d.modelParams)
+	cloned[key] = value
+	d.modelParams = cloned
+	return d
+}
+
+// WithCustomModelParam sets a custom model parameter.
+func (d AIAgentConfigDefault) WithCustomModelParam(key string, value ldvalue.Value) AIAgentConfigDefault {
+	cloned := make(map[string]ldvalue.Value, len(d.modelCustom)+1)
+	maps.Copy(cloned, d.modelCustom)
+	cloned[key] = value
+	d.modelCustom = cloned
+	return d
+}
+
 // Disabled returns a copy of this default with enabled set to false.
 func (d AIAgentConfigDefault) Disabled() AIAgentConfigDefault {
 	d.enabled = false
@@ -206,6 +224,24 @@ func (d AIJudgeConfigDefault) WithProviderName(name string) AIJudgeConfigDefault
 // WithEvaluationMetricKey sets the evaluation metric key.
 func (d AIJudgeConfigDefault) WithEvaluationMetricKey(key string) AIJudgeConfigDefault {
 	d.evaluationMetricKey = key
+	return d
+}
+
+// WithModelParam sets a model parameter.
+func (d AIJudgeConfigDefault) WithModelParam(key string, value ldvalue.Value) AIJudgeConfigDefault {
+	cloned := make(map[string]ldvalue.Value, len(d.modelParams)+1)
+	maps.Copy(cloned, d.modelParams)
+	cloned[key] = value
+	d.modelParams = cloned
+	return d
+}
+
+// WithCustomModelParam sets a custom model parameter.
+func (d AIJudgeConfigDefault) WithCustomModelParam(key string, value ldvalue.Value) AIJudgeConfigDefault {
+	cloned := make(map[string]ldvalue.Value, len(d.modelCustom)+1)
+	maps.Copy(cloned, d.modelCustom)
+	cloned[key] = value
+	d.modelCustom = cloned
 	return d
 }
 

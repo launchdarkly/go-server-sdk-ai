@@ -316,6 +316,66 @@ func TestAIJudgeConfigDefault_Disabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Issue 1: WithModelParam / WithCustomModelParam on agent and judge defaults
+// ---------------------------------------------------------------------------
+
+func TestAIAgentConfigDefault_WithModelParam(t *testing.T) {
+	d := NewAIAgentConfigDefault().
+		WithModelParam("temperature", ldvalue.Float64(0.5)).
+		WithCustomModelParam("custom_key", ldvalue.String("val"))
+
+	v := d.AsLdValue()
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+
+	assert.Equal(t, ldvalue.Float64(0.5), dm.Model.Parameters["temperature"])
+	assert.Equal(t, ldvalue.String("val"), dm.Model.Custom["custom_key"])
+}
+
+func TestAIAgentConfigDefault_WithModelParam_ImmutableCopy(t *testing.T) {
+	base := NewAIAgentConfigDefault().WithModelParam("k", ldvalue.Int(1))
+	modified := base.WithModelParam("k", ldvalue.Int(2))
+
+	bv := base.AsLdValue()
+	var bdm datamodel.Config
+	require.NoError(t, json.Unmarshal(bv.AsRaw(), &bdm))
+	assert.Equal(t, ldvalue.Int(1), bdm.Model.Parameters["k"], "original must be unchanged")
+
+	mv := modified.AsLdValue()
+	var mdm datamodel.Config
+	require.NoError(t, json.Unmarshal(mv.AsRaw(), &mdm))
+	assert.Equal(t, ldvalue.Int(2), mdm.Model.Parameters["k"])
+}
+
+func TestAIJudgeConfigDefault_WithModelParam(t *testing.T) {
+	d := NewAIJudgeConfigDefault().
+		WithModelParam("temperature", ldvalue.Float64(0.9)).
+		WithCustomModelParam("custom_key", ldvalue.String("val"))
+
+	v := d.AsLdValue()
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+
+	assert.Equal(t, ldvalue.Float64(0.9), dm.Model.Parameters["temperature"])
+	assert.Equal(t, ldvalue.String("val"), dm.Model.Custom["custom_key"])
+}
+
+func TestAIJudgeConfigDefault_WithModelParam_ImmutableCopy(t *testing.T) {
+	base := NewAIJudgeConfigDefault().WithModelParam("k", ldvalue.Int(1))
+	modified := base.WithModelParam("k", ldvalue.Int(2))
+
+	bv := base.AsLdValue()
+	var bdm datamodel.Config
+	require.NoError(t, json.Unmarshal(bv.AsRaw(), &bdm))
+	assert.Equal(t, ldvalue.Int(1), bdm.Model.Parameters["k"], "original must be unchanged")
+
+	mv := modified.AsLdValue()
+	var mdm datamodel.Config
+	require.NoError(t, json.Unmarshal(mv.AsRaw(), &mdm))
+	assert.Equal(t, ldvalue.Int(2), mdm.Model.Parameters["k"])
+}
+
+// ---------------------------------------------------------------------------
 // Backward compatibility: deprecated Config alias and ConfigBuilder
 // ---------------------------------------------------------------------------
 
