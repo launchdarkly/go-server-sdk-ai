@@ -29,7 +29,7 @@ type Tracker interface {
 
 // Compile-time assertions that the ldai package's types satisfy these interfaces.
 var (
-	_ Config  = (*ldai.Config)(nil)
+	_ Config  = (*ldai.AICompletionConfig)(nil)
 	_ Tracker = (*ldai.Tracker)(nil)
 )
 

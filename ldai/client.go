@@ -3,7 +3,9 @@ package ldai
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 
@@ -114,6 +116,7 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 // returnDefault sets a tracker factory on a copy of def (so CreateTracker always works) and
 // returns the resulting Config. Used for all error-path returns in evaluateConfig.
 func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
+	def.key = key
 	def.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger)
 	}
@@ -160,37 +163,56 @@ func (c *Client) evaluateConfig(
 		mergedVariables[k] = v
 	}
 
-	builder := NewConfig().
-		WithModelName(parsed.Model.Name).
-		WithProviderName(parsed.Provider.Name).
-		WithEnabled(parsed.Meta.Enabled).
-		WithMode(parsed.Mode).
-		WithEvaluationMetricKey(parsed.EvaluationMetricKey).
-		WithEvaluationMetricKeys(parsed.EvaluationMetricKeys).
-		WithJudgeConfiguration(parsed.JudgeConfiguration)
-
-	for k, v := range parsed.Model.Parameters {
-		builder.WithModelParam(k, v)
-	}
-
-	for k, v := range parsed.Model.Custom {
-		builder.WithCustomModelParam(k, v)
-	}
-
+	// Interpolate message templates.
+	interpolatedMessages := make([]datamodel.Message, 0, len(parsed.Messages))
 	for i, msg := range parsed.Messages {
 		content, err := interpolateTemplate(msg.Content, mergedVariables)
 		if err != nil {
-			c.logConfigWarning(key,
-				"malformed message at index %d: %v", i, err,
-			)
+			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
 			return c.returnDefault(key, context, defaultValue)
 		}
-		builder.WithMessage(content, msg.Role)
+		interpolatedMessages = append(interpolatedMessages, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
-	cfg := builder.Build()
-	cfg.c.Meta.VariationKey = parsed.Meta.VariationKey
-	cfg.c.Meta.Version = parsed.Meta.Version
+	// Derive the version, defaulting to 0 (Version() returns 1 for zero).
+	version := 0
+	if parsed.Meta.Version != nil {
+		version = *parsed.Meta.Version
+	}
+
+	// Parse root-level tools map.
+	tools := make(map[string]ToolConfig, len(parsed.Tools))
+	for name, t := range parsed.Tools {
+		tools[name] = toolConfigFromWire(t)
+	}
+
+	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
+	// the wire response so that model.parameters.tools[] is preserved verbatim.
+	raw := parsed
+	raw.Messages = interpolatedMessages
+
+	cfg := AICompletionConfig{
+		aiConfigBase: aiConfigBase{
+			key:          key,
+			enabled:      parsed.Meta.Enabled,
+			variationKey: parsed.Meta.VariationKey,
+			version:      version,
+			model: ModelConfig{
+				Name:       parsed.Model.Name,
+				Parameters: maps.Clone(parsed.Model.Parameters),
+				Custom:     maps.Clone(parsed.Model.Custom),
+			},
+			provider:  ProviderConfig{Name: parsed.Provider.Name},
+			tools:     tools,
+			evaluator: newNoopEvaluator(),
+		},
+		messages:             interpolatedMessages,
+		judgeConfiguration:   parsed.JudgeConfiguration.Clone(),
+		mode:                 parsed.Mode,
+		evaluationMetricKey:  parsed.EvaluationMetricKey,
+		evaluationMetricKeys: slices.Clone(parsed.EvaluationMetricKeys),
+		raw:                  raw,
+	}
 
 	cfg.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
