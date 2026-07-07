@@ -360,6 +360,65 @@ func TestAIJudgeConfigDefault_WithModelParam(t *testing.T) {
 	assert.Equal(t, ldvalue.String("val"), dm.Model.Custom["custom_key"])
 }
 
+// ---------------------------------------------------------------------------
+// Issue 2: tools + judgeConfiguration on AIAgentConfigDefault
+// ---------------------------------------------------------------------------
+
+func TestAIAgentConfigDefault_WithTool(t *testing.T) {
+	tool := datamodel.Tool{
+		Name:        "search",
+		Description: "Web search",
+		Type:        "function",
+	}
+	d := NewAIAgentConfigDefault().WithTool(tool)
+
+	v := d.AsLdValue()
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+
+	require.Contains(t, dm.Tools, "search")
+	assert.Equal(t, "search", dm.Tools["search"].Name)
+	assert.Equal(t, "Web search", dm.Tools["search"].Description)
+	assert.Equal(t, "function", dm.Tools["search"].Type)
+}
+
+func TestAIAgentConfigDefault_WithTool_ImmutableCopy(t *testing.T) {
+	base := NewAIAgentConfigDefault().WithTool(datamodel.Tool{Name: "a"})
+	extended := base.WithTool(datamodel.Tool{Name: "b"})
+
+	bv := base.AsLdValue()
+	var bdm datamodel.Config
+	require.NoError(t, json.Unmarshal(bv.AsRaw(), &bdm))
+	assert.NotContains(t, bdm.Tools, "b", "adding a tool must not mutate the original")
+
+	ev := extended.AsLdValue()
+	var edm datamodel.Config
+	require.NoError(t, json.Unmarshal(ev.AsRaw(), &edm))
+	assert.Contains(t, edm.Tools, "a")
+	assert.Contains(t, edm.Tools, "b")
+}
+
+func TestAIAgentConfigDefault_WithJudgeConfiguration(t *testing.T) {
+	jc := &datamodel.JudgeConfiguration{
+		Judges: []datamodel.Judge{
+			{Key: "judge1", SamplingRate: 0.5},
+		},
+	}
+	d := NewAIAgentConfigDefault().WithJudgeConfiguration(jc)
+
+	// Mutating the original after calling WithJudgeConfiguration must not affect the default.
+	jc.Judges[0].Key = "mutated"
+
+	v := d.AsLdValue()
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+
+	require.NotNil(t, dm.JudgeConfiguration)
+	require.Len(t, dm.JudgeConfiguration.Judges, 1)
+	assert.Equal(t, "judge1", dm.JudgeConfiguration.Judges[0].Key)
+	assert.Equal(t, 0.5, dm.JudgeConfiguration.Judges[0].SamplingRate)
+}
+
 func TestAIJudgeConfigDefault_WithModelParam_ImmutableCopy(t *testing.T) {
 	base := NewAIJudgeConfigDefault().WithModelParam("k", ldvalue.Int(1))
 	modified := base.WithModelParam("k", ldvalue.Int(2))
