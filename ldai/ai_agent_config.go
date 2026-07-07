@@ -1,8 +1,6 @@
 package ldai
 
 import (
-	"slices"
-
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 )
 
@@ -20,11 +18,6 @@ type AIAgentConfig struct {
 // Instructions returns the agent's system instructions string.
 func (c *AIAgentConfig) Instructions() string {
 	return c.instructions
-}
-
-// Messages returns messages associated with this agent config, if any.
-func (c *AIAgentConfig) Messages() []datamodel.Message {
-	return slices.Clone([]datamodel.Message(nil))
 }
 
 // JudgeConfiguration returns the judge configuration attached to this config, if any.
