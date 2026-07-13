@@ -134,13 +134,20 @@ type resumptionPayload struct {
 // specific semantics. Call CreateTracker on the AI Config to start a new run.
 // A ResumptionToken preserves the runId, so events emitted by a Tracker
 // reconstructed in another process correlate with the original run.
+// trackableConfig is the minimal interface that newTracker needs from a config. Both
+// *AICompletionConfig and *AIJudgeConfig satisfy it via aiConfigBase promotion.
+type trackableConfig interface {
+	ModelName() string
+	ProviderName() string
+}
+
 type Tracker struct {
 	key          string
 	runID        string
 	variationKey string
 	version      int
 	graphKey     string
-	config       *Config
+	config       trackableConfig
 	context      ldcontext.Context
 	events       EventSink
 	trackData    ldvalue.Value
@@ -177,7 +184,7 @@ func newTracker(
 	variationKey string,
 	version int,
 	ctx ldcontext.Context,
-	config *Config,
+	config trackableConfig,
 	loggers interfaces.LDLoggers,
 	graphKey string,
 ) *Tracker {
@@ -195,7 +202,7 @@ func newTrackerWithStopwatch(
 	variationKey string,
 	version int,
 	ctx ldcontext.Context,
-	config *Config,
+	config trackableConfig,
 	loggers interfaces.LDLoggers,
 	stopwatch Stopwatch,
 	graphKey string,
@@ -451,7 +458,11 @@ func (t *Tracker) GetSummary() MetricSummary {
 // Subsequent calls re-run the task but emit only metrics not already recorded
 // on this Tracker. Call CreateTracker on the AI Config to start a new run.
 func (t *Tracker) TrackRequest(task func(c *Config) (ProviderResponse, error)) (ProviderResponse, error) {
-	usage, duration, err := measureDurationOfTask(t.stopwatch, t.config, task)
+	cfg, ok := t.config.(*Config)
+	if !ok {
+		return ProviderResponse{}, fmt.Errorf("TrackRequest is only available for completion configs")
+	}
+	usage, duration, err := measureDurationOfTask(t.stopwatch, cfg, task)
 	if err != nil {
 		if e := t.TrackError(); e != nil {
 			t.logWarning("error tracking error metric for request: %v", e)

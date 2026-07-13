@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
@@ -431,7 +432,7 @@ func TestJudgeConfigMethodTracking(t *testing.T) {
 	// Clear the SDK info event from construction.
 	mockSDK.events = nil
 
-	defaultConfig := Disabled()
+	defaultConfig := NewAIJudgeConfigDefault()
 	context := ldcontext.New("user-key")
 	configKey := "judge-config-key"
 
@@ -846,7 +847,7 @@ func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(), nil)
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), nil)
 
 	msgs := cfg.Messages()
 	require.Len(t, msgs, 2)
@@ -1007,11 +1008,121 @@ func TestCreateTracker_JudgeConfigHasFactory(t *testing.T) {
 	client, err := NewClient(newMockSDK(json, nil))
 	require.NoError(t, err)
 
-	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(), nil)
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), nil)
 	assert.True(t, cfg.Enabled())
 
 	tracker := cfg.CreateTracker()
 	require.NotNil(t, tracker, "enabled judge config should have a tracker factory")
+}
+
+// TestJudgeConfig_TypedReturn verifies that JudgeConfig returns a correctly populated AIJudgeConfig
+// with the right field values from the wire payload.
+func TestJudgeConfig_TypedReturn(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v-judge", "enabled": true},
+		"evaluationMetricKey": "toxicity",
+		"model": {"name": "judge-model"},
+		"provider": {"name": "judge-provider"},
+		"messages": [
+			{"content": "Hello {{name}}", "role": "system"}
+		]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), map[string]interface{}{"name": "World"})
+
+	assert.True(t, cfg.Enabled())
+	assert.Equal(t, "toxicity", cfg.EvaluationMetricKey())
+	assert.Equal(t, "judge-model", cfg.Model().Name)
+	assert.Equal(t, "judge-provider", cfg.Provider().Name)
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "Hello World", msgs[0].Content)
+}
+
+// TestJudgeConfig_DefaultPath verifies that the error/offline path returns an AIJudgeConfig built
+// from the provided AIJudgeConfigDefault, with a working CreateTracker().
+func TestJudgeConfig_DefaultPath(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIJudgeConfigDefault().
+		WithModelName("fallback-model").
+		WithProviderName("fallback-provider").
+		WithEvaluationMetricKey("accuracy")
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), def, nil)
+
+	assert.True(t, cfg.Enabled(), "default path should be enabled by default")
+	assert.Equal(t, "fallback-model", cfg.Model().Name)
+	assert.Equal(t, "fallback-provider", cfg.Provider().Name)
+	assert.Equal(t, "accuracy", cfg.EvaluationMetricKey())
+	assert.NotNil(t, cfg.CreateTracker(), "default-path judge config must have a working tracker factory")
+}
+
+// TestJudgeConfig_TrackerEmitsCorrectTrackData verifies that the tracker produced from a judge config
+// emits the expected model/provider/configKey/version fields.
+func TestJudgeConfig_TrackerEmitsCorrectTrackData(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v-j", "enabled": true, "version": 3},
+		"evaluationMetricKey": "relevance",
+		"model": {"name": "judge-model"},
+		"provider": {"name": "judge-provider"},
+		"messages": [{"content": "test", "role": "system"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	ctx := ldcontext.New("user-key")
+	cfg := client.JudgeConfig("judge-config", ctx, NewAIJudgeConfigDefault(), nil)
+	tracker := cfg.CreateTracker()
+	require.NotNil(t, tracker)
+	require.NoError(t, tracker.TrackSuccess())
+
+	var genEvent *mockEvent
+	for i, e := range mockSDK.events {
+		if e.eventName == "$ld:ai:generation:success" {
+			genEvent = &mockSDK.events[i]
+			break
+		}
+	}
+	require.NotNil(t, genEvent)
+	data := genEvent.data
+	assert.Equal(t, "judge-config", data.GetByKey("configKey").StringValue())
+	assert.Equal(t, "v-j", data.GetByKey("variationKey").StringValue())
+	assert.Equal(t, 3, data.GetByKey("version").IntValue())
+	assert.Equal(t, "judge-provider", data.GetByKey("providerName").StringValue())
+	assert.Equal(t, "judge-model", data.GetByKey("modelName").StringValue())
+	assert.NotEmpty(t, data.GetByKey("runId").StringValue())
+}
+
+// TestJudgeConfig_CompletionUnchanged is a regression guard verifying that CompletionConfig
+// still returns AICompletionConfig with its full field set after the evaluateShared refactor.
+func TestJudgeConfig_CompletionUnchanged(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v-c", "enabled": true},
+		"evaluationMetricKey": "score",
+		"model": {"name": "comp-model"},
+		"provider": {"name": "comp-provider"},
+		"messages": [{"content": "Hi {{who}}", "role": "user"}]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("comp-key", ldcontext.New("user"), Disabled(), map[string]interface{}{"who": "there"})
+
+	assert.True(t, cfg.Enabled())
+	assert.Equal(t, "comp-model", cfg.Model().Name)
+	assert.Equal(t, "comp-provider", cfg.Provider().Name)
+	assert.Equal(t, "score", cfg.EvaluationMetricKey())
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "Hi there", msgs[0].Content)
+	assert.NotNil(t, cfg.CreateTracker())
 }
 
 func TestClient_CreateTracker_RoundTrip(t *testing.T) {

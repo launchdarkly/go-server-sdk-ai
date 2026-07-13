@@ -123,38 +123,34 @@ func (c *Client) returnDefault(key string, context ldcontext.Context, def Config
 	return def
 }
 
-// evaluateConfig fetches and interpolates an AI Config without emitting any metric.
-// Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
-func (c *Client) evaluateConfig(
+// evaluateShared fetches, validates, unmarshals, and interpolates a config. On any failure it
+// returns ok=false; the caller is responsible for returning its own typed default. On success it
+// returns the parsed wire config, the interpolated messages, the resolved tools, and the raw
+// ldvalue.Value served by the SDK (needed to assemble AsLdValue()).
+func (c *Client) evaluateShared(
 	key string,
 	context ldcontext.Context,
-	defaultValue Config,
+	defaultLdValue ldvalue.Value,
 	variables map[string]interface{},
-) Config {
-	result, err := c.sdk.JSONVariation(key, context, defaultValue.AsLdValue())
+) (parsed datamodel.Config, interpolated []datamodel.Message, tools map[string]ToolConfig, served ldvalue.Value, ok bool) {
+	result, err := c.sdk.JSONVariation(key, context, defaultLdValue)
 	if err != nil {
-		// The evaluation failed (e.g. flag not found, client not initialized), so the SDK returned the
-		// default value. Return it as-is: interpolation is not applied to the default value's messages.
-		return c.returnDefault(key, context, defaultValue)
+		return
 	}
 
-	// The spec requires the config to at least be an object (although all properties are optional, so it may be an
-	// empty object.)
 	if result.Type() != ldvalue.ObjectType {
 		c.logConfigWarning(key, "unmarshalling failed, expected JSON object but got %s", result.Type().String())
-		return c.returnDefault(key, context, defaultValue)
+		return
 	}
 
-	var parsed datamodel.Config
 	if err := json.Unmarshal(result.AsRaw(), &parsed); err != nil {
 		c.logConfigWarning(key, "unmarshalling failed: %v", err)
-		return c.returnDefault(key, context, defaultValue)
+		return
 	}
 
 	mergedVariables := map[string]interface{}{
 		ldContextVariable: getAllAttributes(context),
 	}
-
 	for k, v := range variables {
 		if k == ldContextVariable {
 			c.logConfigWarning(key, "config variables contains 'ldctx', which is reserved and cannot be overwritten")
@@ -163,23 +159,37 @@ func (c *Client) evaluateConfig(
 		mergedVariables[k] = v
 	}
 
-	// Interpolate message templates.
-	interpolatedMessages := make([]datamodel.Message, 0, len(parsed.Messages))
+	msgs := make([]datamodel.Message, 0, len(parsed.Messages))
 	for i, msg := range parsed.Messages {
 		content, err := interpolateTemplate(msg.Content, mergedVariables)
 		if err != nil {
 			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
-			return c.returnDefault(key, context, defaultValue)
+			return
 		}
-		interpolatedMessages = append(interpolatedMessages, datamodel.Message{Content: content, Role: msg.Role})
+		msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
-	tools := c.resolveTools(key, result)
+	return parsed, msgs, c.resolveTools(key, result), result, true
+}
+
+// evaluateConfig fetches and interpolates an AI Config without emitting any metric.
+// Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
+func (c *Client) evaluateConfig(
+	key string,
+	context ldcontext.Context,
+	defaultValue Config,
+	variables map[string]interface{},
+) Config {
+	parsed, interpolatedMessages, tools, result, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
+	if !ok {
+		return c.returnDefault(key, context, defaultValue)
+	}
 
 	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
 	// the wire response so that model.parameters.tools[] is preserved verbatim.
 	raw := parsed
 	raw.Messages = interpolatedMessages
+	_ = result // served value not needed for the completion path beyond what evaluateShared already used
 
 	cfg := AICompletionConfig{
 		aiConfigBase: aiConfigBase{
@@ -324,35 +334,83 @@ func emptyToNil(tools map[string]ToolConfig) map[string]ToolConfig {
 	return tools
 }
 
+// returnJudgeDefault builds an AIJudgeConfig from the provided default, wires a tracker factory,
+// and returns it. Used for all error-path returns in JudgeConfig.
+func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def AIJudgeConfigDefault) AIJudgeConfig {
+	cfg := AIJudgeConfig{
+		aiConfigBase: aiConfigBase{
+			key:     key,
+			enabled: def.enabled,
+			model: ModelConfig{
+				Name:       def.modelName,
+				Parameters: maps.Clone(def.modelParams),
+				Custom:     maps.Clone(def.modelCustom),
+			},
+			provider: ProviderConfig{Name: def.providerName},
+		},
+		messages:            slices.Clone(def.messages),
+		evaluationMetricKey: def.evaluationMetricKey,
+	}
+	cfg.trackerFactory = func() *Tracker {
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, 1, context, &cfg, c.logger, "")
+	}
+	return cfg
+}
+
 // JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved
 // variables message_history and response_to_evaluate are preserved as literal placeholders for
 // substitution by Judge.buildMessages during evaluation.
 //
-// To send analytic events to LaunchDarkly, call CreateTracker on the returned Config to obtain a Tracker.
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIJudgeConfig to obtain a Tracker.
 func (c *Client) JudgeConfig(
 	key string,
 	context ldcontext.Context,
-	defaultValue Config,
+	defaultValue AIJudgeConfigDefault,
 	variables map[string]interface{},
-) Config {
+) AIJudgeConfig {
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
 
-	// Extend variables with reserved judge placeholders
+	// Extend variables with reserved judge placeholders.
 	extendedVariables := make(map[string]interface{})
 	for k, v := range variables {
-		// Warn if user tries to override reserved variables
 		if k == "message_history" || k == "response_to_evaluate" {
 			c.logger.Warnf("AI Config '%s': variable '%s' is reserved by judge and will be ignored", key, k)
 			continue
 		}
 		extendedVariables[k] = v
 	}
-
-	// Inject reserved variables as literal placeholder strings
-	// These will be preserved through the first interpolation and resolved during Judge.Evaluate()
 	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
 	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
 
-	return c.evaluateConfig(key, context, defaultValue, extendedVariables)
+	parsed, interpolated, tools, _, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables)
+	if !ok {
+		return c.returnJudgeDefault(key, context, defaultValue)
+	}
+
+	cfg := AIJudgeConfig{
+		aiConfigBase: aiConfigBase{
+			key:          key,
+			enabled:      parsed.Meta.Enabled,
+			variationKey: parsed.Meta.VariationKey,
+			version:      parsed.Meta.Version,
+			model: ModelConfig{
+				Name:       parsed.Model.Name,
+				Parameters: maps.Clone(parsed.Model.Parameters),
+				Custom:     maps.Clone(parsed.Model.Custom),
+			},
+			provider: ProviderConfig{Name: parsed.Provider.Name},
+			tools:    tools,
+		},
+		messages:            interpolated,
+		evaluationMetricKey: parsed.EvaluationMetricKey,
+	}
+	cfg.trackerFactory = func() *Tracker {
+		ver := 1
+		if cfg.version != nil {
+			ver = *cfg.version
+		}
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, ver, context, &cfg, c.logger, "")
+	}
+	return cfg
 }

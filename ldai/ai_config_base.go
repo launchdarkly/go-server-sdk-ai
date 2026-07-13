@@ -60,6 +60,12 @@ func (b *aiConfigBase) Provider() ProviderConfig { return b.provider }
 // This is distinct from model.parameters.tools which is passed to LLM providers verbatim.
 func (b *aiConfigBase) Tools() map[string]ToolConfig { return maps.Clone(b.tools) }
 
+// ModelName returns the model name associated with the config.
+func (b *aiConfigBase) ModelName() string { return b.model.Name }
+
+// ProviderName returns the provider name associated with the config.
+func (b *aiConfigBase) ProviderName() string { return b.provider.Name }
+
 // CreateTracker returns a new Tracker for a fresh AI run. Each call mints a new runId (a
 // UUIDv4) that LaunchDarkly uses to correlate the run's events in metrics views. Call this
 // once per AI run; metrics from different runIds cannot be combined.
