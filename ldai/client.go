@@ -118,7 +118,7 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
 	def.key = key
 	def.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger)
+		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger, "")
 	}
 	return def
 }
@@ -203,7 +203,7 @@ func (c *Client) evaluateConfig(
 	}
 
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger)
+		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger, "")
 	}
 
 	return cfg

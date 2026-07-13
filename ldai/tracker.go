@@ -123,6 +123,7 @@ type resumptionPayload struct {
 	ConfigKey    string `json:"configKey"`
 	VariationKey string `json:"variationKey,omitempty"`
 	Version      int    `json:"version"`
+	GraphKey     string `json:"graphKey,omitempty"`
 }
 
 // Tracker records metrics for a single AI run.
@@ -138,6 +139,7 @@ type Tracker struct {
 	runID        string
 	variationKey string
 	version      int
+	graphKey     string
 	config       *Config
 	context      ldcontext.Context
 	events       EventSink
@@ -177,8 +179,11 @@ func newTracker(
 	ctx ldcontext.Context,
 	config *Config,
 	loggers interfaces.LDLoggers,
+	graphKey string,
 ) *Tracker {
-	return newTrackerWithStopwatch(events, runID, key, variationKey, version, ctx, config, loggers, &defaultStopwatch{})
+	return newTrackerWithStopwatch(
+		events, runID, key, variationKey, version, ctx, config, loggers, &defaultStopwatch{}, graphKey,
+	)
 }
 
 // newTrackerWithStopwatch creates a new Tracker with the specified runID, key, event sink, config, context, loggers,
@@ -193,6 +198,7 @@ func newTrackerWithStopwatch(
 	config *Config,
 	loggers interfaces.LDLoggers,
 	stopwatch Stopwatch,
+	graphKey string,
 ) *Tracker {
 	if config == nil {
 		panic("LaunchDarkly SDK programmer error: config must never be nil")
@@ -209,6 +215,9 @@ func newTrackerWithStopwatch(
 	if variationKey != "" {
 		builder.Set("variationKey", ldvalue.String(variationKey))
 	}
+	if graphKey != "" {
+		builder.Set("graphKey", ldvalue.String(graphKey))
+	}
 	trackData := builder.Build()
 
 	return &Tracker{
@@ -216,6 +225,7 @@ func newTrackerWithStopwatch(
 		runID:        runID,
 		variationKey: variationKey,
 		version:      version,
+		graphKey:     graphKey,
 		config:       config,
 		trackData:    trackData,
 		events:       events,
@@ -232,13 +242,14 @@ func (t *Tracker) logWarning(format string, args ...interface{}) {
 
 // ResumptionToken returns a URL-safe Base64-encoded token that can be used to reconstruct a tracker
 // in a different process (e.g., for deferred feedback). The token contains the runId, configKey,
-// variationKey, and version. It does not contain modelName or providerName.
+// variationKey, version, and graphKey when present. It does not contain modelName or providerName.
 func (t *Tracker) ResumptionToken() string {
 	payload := resumptionPayload{
 		RunID:        t.runID,
 		ConfigKey:    t.key,
 		VariationKey: t.variationKey,
 		Version:      t.version,
+		GraphKey:     t.graphKey,
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	return base64.RawURLEncoding.EncodeToString(jsonBytes)
@@ -269,6 +280,7 @@ func TrackerFromResumptionToken(token string, sdk ServerSDK, context ldcontext.C
 		context,
 		&emptyConfig,
 		sdk.Loggers(),
+		payload.GraphKey,
 	), nil
 }
 

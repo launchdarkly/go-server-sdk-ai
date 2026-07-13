@@ -1106,3 +1106,36 @@ func TestClient_CreateTracker_InvalidToken(t *testing.T) {
 		assert.NotEmpty(t, resumeToken)
 	})
 }
+
+func TestClient_CreateTracker_RoundTrip_WithGraphKey(t *testing.T) {
+	events := newMockEvents()
+	config := &Config{}
+	originalTracker := newTracker(events, newRunID(), "my-config", "var-1", 5, ldcontext.New("user"), config, nil, "my-graph")
+
+	token := originalTracker.ResumptionToken()
+	require.NotEmpty(t, token)
+
+	mockSDK := newMockSDK(nil, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	reconstructed, err := client.CreateTracker(token, ldcontext.New("other-user"))
+	require.NoError(t, err)
+	require.NotNil(t, reconstructed)
+
+	assert.Equal(t, token, reconstructed.ResumptionToken())
+
+	assert.NoError(t, reconstructed.TrackSuccess())
+
+	var successEvent *mockEvent
+	for i, e := range mockSDK.events {
+		if e.eventName == "$ld:ai:generation:success" {
+			successEvent = &mockSDK.events[i]
+			break
+		}
+	}
+	require.NotNil(t, successEvent)
+	assert.Equal(t, "my-graph", successEvent.data.GetByKey("graphKey").StringValue())
+	assert.Equal(t, "my-config", successEvent.data.GetByKey("configKey").StringValue())
+}
