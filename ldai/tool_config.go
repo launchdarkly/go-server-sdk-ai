@@ -4,7 +4,6 @@ import (
 	"maps"
 
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
-	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 )
 
 // ToolConfig provides read-only access to a tool definition from the root-level tools map.
@@ -37,13 +36,36 @@ func (t ToolConfig) CustomParameters() map[string]ldvalue.Value {
 	return maps.Clone(t.customParameters)
 }
 
-// toolConfigFromWire converts a datamodel.Tool (wire format) into a ToolConfig (public API).
-func toolConfigFromWire(t datamodel.Tool) ToolConfig {
+// toolConfigFromRawValue builds a ToolConfig directly from a raw JSON object value.
+// fallbackName is used as the tool name if the entry has no explicit "name" field.
+// Used for legacy model.parameters.tools[] entries, which are not parsed via json.Unmarshal.
+func toolConfigFromRawValue(item ldvalue.Value, fallbackName string) ToolConfig {
+	name := item.GetByKey("name").StringValue()
+	if name == "" {
+		name = fallbackName
+	}
+
+	var parameters map[string]ldvalue.Value
+	if pv := item.GetByKey("parameters"); pv.Type() == ldvalue.ObjectType {
+		parameters = make(map[string]ldvalue.Value, pv.Count())
+		for _, k := range pv.Keys(nil) {
+			parameters[k] = pv.GetByKey(k)
+		}
+	}
+
+	var customParameters map[string]ldvalue.Value
+	if cv := item.GetByKey("customParameters"); cv.Type() == ldvalue.ObjectType {
+		customParameters = make(map[string]ldvalue.Value, cv.Count())
+		for _, k := range cv.Keys(nil) {
+			customParameters[k] = cv.GetByKey(k)
+		}
+	}
+
 	return ToolConfig{
-		name:             t.Name,
-		description:      t.Description,
-		toolType:         t.Type,
-		parameters:       maps.Clone(t.Parameters),
-		customParameters: maps.Clone(t.CustomParameters),
+		name:             name,
+		description:      item.GetByKey("description").StringValue(),
+		toolType:         item.GetByKey("type").StringValue(),
+		parameters:       parameters,
+		customParameters: customParameters,
 	}
 }

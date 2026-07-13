@@ -180,11 +180,7 @@ func (c *Client) evaluateConfig(
 		version = *parsed.Meta.Version
 	}
 
-	// Parse root-level tools map.
-	tools := make(map[string]ToolConfig, len(parsed.Tools))
-	for name, t := range parsed.Tools {
-		tools[name] = toolConfigFromWire(t)
-	}
+	tools := c.resolveTools(key, result)
 
 	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
 	// the wire response so that model.parameters.tools[] is preserved verbatim.
@@ -279,6 +275,60 @@ func interpolateTemplate(template string, variables map[string]interface{}) (str
 		return "", err
 	}
 	return m.RenderString(variables)
+}
+
+// resolveTools determines the tools map to expose on the config.
+// The root-level "tools" key is authoritative (even when empty), suppressing any legacy fallback.
+// When the root key is absent, the legacy model.parameters.tools[] array is used instead.
+// Malformed or unnamed entries in the legacy array are skipped with a warning; the config is
+// still returned (not defaulted). Root-level entries are always valid objects because
+// json.Unmarshal would have failed before this function is reached if they were not.
+func (c *Client) resolveTools(key string, served ldvalue.Value) map[string]ToolConfig {
+	// Check for the presence of the root "tools" key (absent ≠ null).
+	toolsKeyPresent := slices.Contains(served.Keys(nil), "tools")
+
+	if toolsKeyPresent {
+		toolsVal := served.GetByKey("tools")
+		if toolsVal.Type() != ldvalue.ObjectType {
+			// Key present but value is not an object (e.g. null). No tools, no fallback.
+			return nil
+		}
+		tools := make(map[string]ToolConfig, toolsVal.Count())
+		for _, k := range toolsVal.Keys(nil) {
+			tools[k] = toolConfigFromRawValue(toolsVal.GetByKey(k), k)
+		}
+		return emptyToNil(tools)
+	}
+
+	// Root key absent — fall back to model.parameters.tools[].
+	legacyTools := served.GetByKey("model").GetByKey("parameters").GetByKey("tools")
+	if legacyTools.Type() != ldvalue.ArrayType {
+		return nil
+	}
+
+	tools := make(map[string]ToolConfig)
+	for i := range legacyTools.Count() {
+		v := legacyTools.GetByIndex(i)
+		if v.Type() != ldvalue.ObjectType {
+			c.logConfigWarning(key, "model.parameters.tools[%d] is not an object; skipping", i)
+			continue
+		}
+		name := v.GetByKey("name").StringValue()
+		if name == "" {
+			c.logConfigWarning(key, "model.parameters.tools[%d] has no 'name'; skipping", i)
+			continue
+		}
+		tools[name] = toolConfigFromRawValue(v, name)
+	}
+	return emptyToNil(tools)
+}
+
+// emptyToNil returns nil when tools is empty so that "no tools" is uniform across all callers.
+func emptyToNil(tools map[string]ToolConfig) map[string]ToolConfig {
+	if len(tools) == 0 {
+		return nil
+	}
+	return tools
 }
 
 // JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved

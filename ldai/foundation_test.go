@@ -72,15 +72,13 @@ func TestDatamodelRoundTrip_InstructionsField(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestToolConfigAccessors(t *testing.T) {
-	wire := datamodel.Tool{
-		Name:             "calculator",
-		Description:      "Performs arithmetic",
-		Type:             "function",
-		Parameters:       map[string]ldvalue.Value{"precision": ldvalue.Int(8)},
-		CustomParameters: map[string]ldvalue.Value{"internal": ldvalue.Bool(true)},
+	tc := ToolConfig{
+		name:             "calculator",
+		description:      "Performs arithmetic",
+		toolType:         "function",
+		parameters:       map[string]ldvalue.Value{"precision": ldvalue.Int(8)},
+		customParameters: map[string]ldvalue.Value{"internal": ldvalue.Bool(true)},
 	}
-
-	tc := toolConfigFromWire(wire)
 
 	assert.Equal(t, "calculator", tc.Name())
 	assert.Equal(t, "Performs arithmetic", tc.Description())
@@ -90,11 +88,10 @@ func TestToolConfigAccessors(t *testing.T) {
 }
 
 func TestToolConfig_DefensiveCopyOnParameters(t *testing.T) {
-	wire := datamodel.Tool{
-		Name:       "tool",
-		Parameters: map[string]ldvalue.Value{"key": ldvalue.String("original")},
+	tc := ToolConfig{
+		name:       "tool",
+		parameters: map[string]ldvalue.Value{"key": ldvalue.String("original")},
 	}
-	tc := toolConfigFromWire(wire)
 
 	// Mutating the returned map must not affect subsequent calls.
 	p1 := tc.Parameters()
@@ -105,11 +102,10 @@ func TestToolConfig_DefensiveCopyOnParameters(t *testing.T) {
 }
 
 func TestToolConfig_DefensiveCopyOnCustomParameters(t *testing.T) {
-	wire := datamodel.Tool{
-		Name:             "tool",
-		CustomParameters: map[string]ldvalue.Value{"k": ldvalue.Int(1)},
+	tc := ToolConfig{
+		name:             "tool",
+		customParameters: map[string]ldvalue.Value{"k": ldvalue.Int(1)},
 	}
-	tc := toolConfigFromWire(wire)
 
 	cp1 := tc.CustomParameters()
 	cp1["k"] = ldvalue.Int(99)
@@ -183,6 +179,101 @@ func TestCompletionConfig_ModelParametersToolsArrayUntouched(t *testing.T) {
 	require.True(t, ok, "model.parameters.tools must be present")
 	assert.Equal(t, ldvalue.ArrayType, toolsParam.Type())
 	assert.Equal(t, 1, toolsParam.Count())
+}
+
+func TestCompletionConfig_RootToolsTakePrecedenceOverLegacyArray(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v1", "enabled": true},
+		"tools": {
+			"rootTool": {"name": "rootTool"}
+		},
+		"model": {
+			"parameters": {
+				"tools": [{"name": "legacyTool"}]
+			}
+		}
+	}`)
+
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+
+	tools := cfg.Tools()
+	require.Len(t, tools, 1)
+	assert.Contains(t, tools, "rootTool")
+	assert.NotContains(t, tools, "legacyTool")
+}
+
+func TestCompletionConfig_EmptyRootToolsSuppressesFallback(t *testing.T) {
+	// An explicit empty root tools map must suppress the legacy fallback.
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v1", "enabled": true},
+		"tools": {},
+		"model": {
+			"parameters": {
+				"tools": [{"name": "legacyTool"}]
+			}
+		}
+	}`)
+
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Empty(t, cfg.Tools())
+}
+
+func TestCompletionConfig_FallsBackToModelParametersTools(t *testing.T) {
+	// When the root "tools" key is absent, model.parameters.tools[] is used.
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v1", "enabled": true},
+		"model": {
+			"parameters": {
+				"tools": [
+					{"name": "search", "type": "function"},
+					{"name": "calc"}
+				]
+			}
+		}
+	}`)
+
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+
+	tools := cfg.Tools()
+	require.Len(t, tools, 2)
+	assert.Equal(t, "search", tools["search"].Name())
+	assert.Equal(t, "function", tools["search"].Type())
+	assert.Equal(t, "calc", tools["calc"].Name())
+}
+
+func TestCompletionConfig_InvalidLegacyEntriesSkipped(t *testing.T) {
+	// Non-object and unnamed entries in the legacy array are skipped; valid entries are returned
+	// and the config is not defaulted.
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v1", "enabled": true},
+		"model": {
+			"parameters": {
+				"tools": [
+					{"name": "valid"},
+					"not-an-object",
+					{"type": "function"}
+				]
+			}
+		}
+	}`)
+
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+
+	tools := cfg.Tools()
+	require.Len(t, tools, 1)
+	assert.Contains(t, tools, "valid")
 }
 
 // ---------------------------------------------------------------------------
