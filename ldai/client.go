@@ -200,7 +200,7 @@ func (c *Client) evaluateConfig(
 			key:          key,
 			enabled:      parsed.Meta.Enabled,
 			variationKey: parsed.Meta.VariationKey,
-			version:      parsed.Meta.Version,
+			version:      defaultVersion(parsed.Meta.Version),
 			model: ModelConfig{
 				Name:       parsed.Model.Name,
 				Parameters: maps.Clone(parsed.Model.Parameters),
@@ -338,6 +338,15 @@ func emptyToNil(tools map[string]ToolConfig) map[string]ToolConfig {
 	return tools
 }
 
+// defaultVersion returns v when non-nil, or a pointer to 1 when absent from the wire.
+func defaultVersion(v *int) *int {
+	if v == nil {
+		one := 1
+		return &one
+	}
+	return v
+}
+
 // returnJudgeDefault builds an AIJudgeConfig from the provided default, wires a tracker factory,
 // and returns it. Used for all error-path returns in JudgeConfig.
 func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def AIJudgeConfigDefault) AIJudgeConfig {
@@ -345,6 +354,7 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 		aiConfigBase: aiConfigBase{
 			key:     key,
 			enabled: def.enabled,
+			version: defaultVersion(nil),
 			model: ModelConfig{
 				Name:       def.modelName,
 				Parameters: maps.Clone(def.modelParams),
@@ -356,7 +366,7 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 		evaluationMetricKey: def.evaluationMetricKey,
 	}
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, 1, context, &cfg, c.logger, "")
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, *cfg.version, context, &cfg, c.logger, "")
 	}
 	return cfg
 }
@@ -409,7 +419,7 @@ func (c *Client) JudgeConfig(
 			key:          key,
 			enabled:      parsed.Meta.Enabled,
 			variationKey: parsed.Meta.VariationKey,
-			version:      parsed.Meta.Version,
+			version:      defaultVersion(parsed.Meta.Version),
 			model: ModelConfig{
 				Name:       parsed.Model.Name,
 				Parameters: maps.Clone(parsed.Model.Parameters),
@@ -422,11 +432,7 @@ func (c *Client) JudgeConfig(
 		evaluationMetricKey: metricKey,
 	}
 	cfg.trackerFactory = func() *Tracker {
-		ver := 1
-		if cfg.version != nil {
-			ver = *cfg.version
-		}
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, ver, context, &cfg, c.logger, "")
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, *cfg.version, context, &cfg, c.logger, "")
 	}
 	return cfg
 }

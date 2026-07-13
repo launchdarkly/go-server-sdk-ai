@@ -164,6 +164,34 @@ func TestExplicitVersionZeroInTracker(t *testing.T) {
 	assert.Equal(t, 0, events.events[0].data.GetByKey("version").IntValue())
 }
 
+func TestVersion_AbsentDefaultsToOne(t *testing.T) {
+	// Wire config with no version field must report Version() == 1.
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 1, cfg.Version())
+}
+
+func TestVersion_ExplicitNonZero(t *testing.T) {
+	// Wire config with an explicit version must be returned verbatim.
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "version": 7}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 7, cfg.Version())
+}
+
+func TestVersion_DefaultPathReturnsOne(t *testing.T) {
+	// Error/default path must report Version() == 1 and have a working CreateTracker.
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 1, cfg.Version())
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
 func TestParseMultipleMessages(t *testing.T) {
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "1", "enabled": true},

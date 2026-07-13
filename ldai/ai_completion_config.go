@@ -50,9 +50,6 @@ func (c *AICompletionConfig) VariationKey() string {
 //
 // Deprecated: This is an internal implementation detail.
 func (c *AICompletionConfig) Version() int {
-	if c.version == nil {
-		return 1
-	}
 	return *c.version
 }
 
