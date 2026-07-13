@@ -155,7 +155,6 @@ func (cb *ConfigBuilder) Build() Config {
 		},
 		messages:             slices.Clone(cb.messages),
 		judgeConfiguration:   cb.judgeConfiguration.Clone(),
-		mode:                 cb.mode,
 		evaluationMetricKey:  cb.evaluationMetricKey,
 		evaluationMetricKeys: slices.Clone(cb.evaluationMetricKeys),
 		raw:                  raw,

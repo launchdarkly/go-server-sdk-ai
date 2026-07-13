@@ -16,7 +16,6 @@ type AICompletionConfig struct {
 	aiConfigBase
 	messages             []datamodel.Message
 	judgeConfiguration   *datamodel.JudgeConfiguration
-	mode                 string
 	evaluationMetricKey  string
 	evaluationMetricKeys []string
 	// raw is the underlying wire representation, kept for AsLdValue() marshaling.
@@ -93,7 +92,7 @@ func (c *AICompletionConfig) CustomModelParam(key string) (ldvalue.Value, bool) 
 //
 // Deprecated: The config type itself indicates the mode.
 func (c *AICompletionConfig) Mode() string {
-	return c.mode
+	return c.raw.Mode
 }
 
 // EvaluationMetricKey returns the evaluation metric key for judge mode configs.

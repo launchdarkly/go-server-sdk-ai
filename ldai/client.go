@@ -197,7 +197,6 @@ func (c *Client) evaluateConfig(
 		},
 		messages:             interpolatedMessages,
 		judgeConfiguration:   parsed.JudgeConfiguration.Clone(),
-		mode:                 parsed.Mode,
 		evaluationMetricKey:  parsed.EvaluationMetricKey,
 		evaluationMetricKeys: slices.Clone(parsed.EvaluationMetricKeys),
 		raw:                  raw,
