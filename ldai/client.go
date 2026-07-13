@@ -125,8 +125,7 @@ func (c *Client) returnDefault(key string, context ldcontext.Context, def Config
 
 // evaluateShared fetches, validates, unmarshals, and interpolates a config. On any failure it
 // returns ok=false; the caller is responsible for returning its own typed default. On success it
-// returns the parsed wire config, the interpolated messages, the resolved tools, and the raw
-// ldvalue.Value served by the SDK (needed to assemble AsLdValue()).
+// returns the parsed wire config, the interpolated messages, and the resolved tools.
 func (c *Client) evaluateShared(
 	key string,
 	context ldcontext.Context,
@@ -136,22 +135,21 @@ func (c *Client) evaluateShared(
 	parsed datamodel.Config,
 	interpolated []datamodel.Message,
 	tools map[string]ToolConfig,
-	served ldvalue.Value,
 	ok bool,
 ) {
 	result, err := c.sdk.JSONVariation(key, context, defaultLdValue)
 	if err != nil {
-		return datamodel.Config{}, nil, nil, ldvalue.Null(), false
+		return datamodel.Config{}, nil, nil, false
 	}
 
 	if result.Type() != ldvalue.ObjectType {
 		c.logConfigWarning(key, "unmarshalling failed, expected JSON object but got %s", result.Type().String())
-		return datamodel.Config{}, nil, nil, ldvalue.Null(), false
+		return datamodel.Config{}, nil, nil, false
 	}
 
 	if err := json.Unmarshal(result.AsRaw(), &parsed); err != nil {
 		c.logConfigWarning(key, "unmarshalling failed: %v", err)
-		return datamodel.Config{}, nil, nil, ldvalue.Null(), false
+		return datamodel.Config{}, nil, nil, false
 	}
 
 	mergedVariables := map[string]interface{}{
@@ -170,12 +168,12 @@ func (c *Client) evaluateShared(
 		content, err := interpolateTemplate(msg.Content, mergedVariables)
 		if err != nil {
 			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
-			return datamodel.Config{}, nil, nil, ldvalue.Null(), false
+			return datamodel.Config{}, nil, nil, false
 		}
 		msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
-	return parsed, msgs, c.resolveTools(key, result), result, true
+	return parsed, msgs, c.resolveTools(key, result), true
 }
 
 // evaluateConfig fetches and interpolates an AI Config without emitting any metric.
@@ -186,7 +184,7 @@ func (c *Client) evaluateConfig(
 	defaultValue Config,
 	variables map[string]interface{},
 ) Config {
-	parsed, interpolatedMessages, tools, result, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
+	parsed, interpolatedMessages, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
 	if !ok {
 		return c.returnDefault(key, context, defaultValue)
 	}
@@ -195,7 +193,6 @@ func (c *Client) evaluateConfig(
 	// the wire response so that model.parameters.tools[] is preserved verbatim.
 	raw := parsed
 	raw.Messages = interpolatedMessages
-	_ = result // served value not needed for the completion path beyond what evaluateShared already used
 
 	cfg := AICompletionConfig{
 		aiConfigBase: aiConfigBase{
@@ -389,7 +386,7 @@ func (c *Client) JudgeConfig(
 	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
 	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
 
-	parsed, interpolated, tools, _, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables)
+	parsed, interpolated, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables)
 	if !ok {
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
