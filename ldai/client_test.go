@@ -145,6 +145,24 @@ func TestConfigExposesVariationKeyAndVersion(t *testing.T) {
 	assert.Equal(t, 5, cfg.Version())
 }
 
+func TestExplicitVersionZeroInTracker(t *testing.T) {
+	// Version 0 from the wire must be preserved in the tracker's event data.
+	raw := []byte(`{"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 0}}`)
+
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	require.Equal(t, 0, cfg.Version())
+
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", cfg.VariationKey(), cfg.Version(), ldcontext.New("user"), &cfg, nil)
+	_ = tracker.TrackSuccess()
+
+	require.Len(t, events.events, 1)
+	assert.Equal(t, 0, events.events[0].data.GetByKey("version").IntValue())
+}
+
 func TestParseMultipleMessages(t *testing.T) {
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "1", "enabled": true},

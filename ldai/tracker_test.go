@@ -674,3 +674,20 @@ func TestTracker_ResumptionToken(t *testing.T) {
 		assert.False(t, hasProvider, "token should not contain providerName")
 	})
 }
+
+func TestExplicitVersionZeroInResumptionToken(t *testing.T) {
+	// A tracker with version 0 must encode and decode 0, not 1.
+	events := newMockEvents()
+	config := NewConfig().Build()
+	tracker := newTracker(events, newRunID(), "key", "var", 0, ldcontext.New("user"), &config, nil)
+
+	token := tracker.ResumptionToken()
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	require.NoError(t, err)
+
+	var payload struct {
+		Version int `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(decoded, &payload))
+	assert.Equal(t, 0, payload.Version)
+}

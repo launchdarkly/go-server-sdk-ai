@@ -174,12 +174,6 @@ func (c *Client) evaluateConfig(
 		interpolatedMessages = append(interpolatedMessages, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
-	// Derive the version, defaulting to 0 (Version() returns 1 for zero).
-	version := 0
-	if parsed.Meta.Version != nil {
-		version = *parsed.Meta.Version
-	}
-
 	tools := c.resolveTools(key, result)
 
 	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
@@ -192,7 +186,7 @@ func (c *Client) evaluateConfig(
 			key:          key,
 			enabled:      parsed.Meta.Enabled,
 			variationKey: parsed.Meta.VariationKey,
-			version:      version,
+			version:      parsed.Meta.Version,
 			model: ModelConfig{
 				Name:       parsed.Model.Name,
 				Parameters: maps.Clone(parsed.Model.Parameters),

@@ -562,3 +562,13 @@ func TestVersionFromWire(t *testing.T) {
 	assert.Equal(t, 7, cfg.Version())
 	assert.Equal(t, "v1", cfg.VariationKey())
 }
+
+func TestExplicitVersionZeroPreserved(t *testing.T) {
+	// An explicit "version": 0 on the wire must not be collapsed to the absent-version default of 1.
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "version": 0}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 0, cfg.Version())
+}
