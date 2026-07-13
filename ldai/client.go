@@ -6,6 +6,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 
@@ -391,6 +392,18 @@ func (c *Client) JudgeConfig(
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
 
+	// Prefer the singular evaluationMetricKey; fall back to the first non-empty deprecated
+	// evaluationMetricKeys entry for backward compatibility (matches JS/.NET behavior).
+	metricKey := strings.TrimSpace(parsed.EvaluationMetricKey)
+	if metricKey == "" {
+		for _, k := range parsed.EvaluationMetricKeys {
+			if trimmed := strings.TrimSpace(k); trimmed != "" {
+				metricKey = trimmed
+				break
+			}
+		}
+	}
+
 	cfg := AIJudgeConfig{
 		aiConfigBase: aiConfigBase{
 			key:          key,
@@ -406,7 +419,7 @@ func (c *Client) JudgeConfig(
 			tools:    tools,
 		},
 		messages:            interpolated,
-		evaluationMetricKey: parsed.EvaluationMetricKey,
+		evaluationMetricKey: metricKey,
 	}
 	cfg.trackerFactory = func() *Tracker {
 		ver := 1

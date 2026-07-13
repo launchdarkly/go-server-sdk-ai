@@ -1125,6 +1125,58 @@ func TestJudgeConfig_CompletionUnchanged(t *testing.T) {
 	assert.NotNil(t, cfg.CreateTracker())
 }
 
+func TestJudgeConfig_EvaluationMetricKeyFallback(t *testing.T) {
+	makeClient := func(t *testing.T, raw []byte) *Client {
+		t.Helper()
+		client, err := NewClient(newMockSDK(raw, nil))
+		require.NoError(t, err)
+		return client
+	}
+	ctx := ldcontext.New("user")
+	def := NewAIJudgeConfigDefault()
+
+	t.Run("only plural entry → returns first non-empty plural", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"evaluationMetricKeys": ["$ld:ai:judge:x"],
+			"messages": [{"content": "test", "role": "system"}]
+		}`)
+		cfg := makeClient(t, raw).JudgeConfig("k", ctx, def, nil)
+		assert.Equal(t, "$ld:ai:judge:x", cfg.EvaluationMetricKey())
+	})
+
+	t.Run("both present → singular wins", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"evaluationMetricKey": "singular",
+			"evaluationMetricKeys": ["plural"],
+			"messages": [{"content": "test", "role": "system"}]
+		}`)
+		cfg := makeClient(t, raw).JudgeConfig("k", ctx, def, nil)
+		assert.Equal(t, "singular", cfg.EvaluationMetricKey())
+	})
+
+	t.Run("whitespace singular + valid plural → returns first non-empty plural", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"evaluationMetricKey": "   ",
+			"evaluationMetricKeys": ["", "  ", "fallback"],
+			"messages": [{"content": "test", "role": "system"}]
+		}`)
+		cfg := makeClient(t, raw).JudgeConfig("k", ctx, def, nil)
+		assert.Equal(t, "fallback", cfg.EvaluationMetricKey())
+	})
+
+	t.Run("neither present → empty key", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"messages": [{"content": "test", "role": "system"}]
+		}`)
+		cfg := makeClient(t, raw).JudgeConfig("k", ctx, def, nil)
+		assert.Equal(t, "", cfg.EvaluationMetricKey())
+	})
+}
+
 func TestClient_CreateTracker_RoundTrip(t *testing.T) {
 	configJSON := []byte(`{
 		"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 5},
