@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 	"github.com/launchdarkly/go-server-sdk-ai/ldai"
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 	"github.com/stretchr/testify/assert"
@@ -14,8 +13,6 @@ import (
 
 type mockConfig struct {
 	messages             []datamodel.Message
-	modelParam           map[string]ldvalue.Value
-	customParam          map[string]ldvalue.Value
 	evaluationMetricKey  string
 	evaluationMetricKeys []string
 }
@@ -24,20 +21,11 @@ func (m *mockConfig) Messages() []datamodel.Message {
 	return m.messages
 }
 
-func (m *mockConfig) ModelParam(key string) (ldvalue.Value, bool) {
-	val, ok := m.modelParam[key]
-	return val, ok
-}
-
-func (m *mockConfig) CustomModelParam(key string) (ldvalue.Value, bool) {
-	val, ok := m.customParam[key]
-	return val, ok
-}
-
 func (m *mockConfig) EvaluationMetricKey() string {
 	return m.evaluationMetricKey
 }
 
+// EvaluationMetricKeys satisfies the optional configWithLegacyMetricKeys interface.
 func (m *mockConfig) EvaluationMetricKeys() []string {
 	return m.evaluationMetricKeys
 }
