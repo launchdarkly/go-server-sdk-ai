@@ -126,6 +126,13 @@ type resumptionPayload struct {
 	GraphKey     string `json:"graphKey,omitempty"`
 }
 
+// trackableConfig is the minimal interface that newTracker needs from a config. Both
+// *AICompletionConfig and *AIJudgeConfig satisfy it via aiConfigBase promotion.
+type trackableConfig interface {
+	ModelName() string
+	ProviderName() string
+}
+
 // Tracker records metrics for a single AI run.
 // Unless otherwise noted, the Tracker's methods are not safe for concurrent use.
 //
@@ -134,13 +141,6 @@ type resumptionPayload struct {
 // specific semantics. Call CreateTracker on the AI Config to start a new run.
 // A ResumptionToken preserves the runId, so events emitted by a Tracker
 // reconstructed in another process correlate with the original run.
-// trackableConfig is the minimal interface that newTracker needs from a config. Both
-// *AICompletionConfig and *AIJudgeConfig satisfy it via aiConfigBase promotion.
-type trackableConfig interface {
-	ModelName() string
-	ProviderName() string
-}
-
 type Tracker struct {
 	key          string
 	runID        string

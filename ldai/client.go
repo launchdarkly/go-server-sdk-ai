@@ -132,20 +132,26 @@ func (c *Client) evaluateShared(
 	context ldcontext.Context,
 	defaultLdValue ldvalue.Value,
 	variables map[string]interface{},
-) (parsed datamodel.Config, interpolated []datamodel.Message, tools map[string]ToolConfig, served ldvalue.Value, ok bool) {
+) (
+	parsed datamodel.Config,
+	interpolated []datamodel.Message,
+	tools map[string]ToolConfig,
+	served ldvalue.Value,
+	ok bool,
+) {
 	result, err := c.sdk.JSONVariation(key, context, defaultLdValue)
 	if err != nil {
-		return
+		return datamodel.Config{}, nil, nil, ldvalue.Null(), false
 	}
 
 	if result.Type() != ldvalue.ObjectType {
 		c.logConfigWarning(key, "unmarshalling failed, expected JSON object but got %s", result.Type().String())
-		return
+		return datamodel.Config{}, nil, nil, ldvalue.Null(), false
 	}
 
 	if err := json.Unmarshal(result.AsRaw(), &parsed); err != nil {
 		c.logConfigWarning(key, "unmarshalling failed: %v", err)
-		return
+		return datamodel.Config{}, nil, nil, ldvalue.Null(), false
 	}
 
 	mergedVariables := map[string]interface{}{
@@ -164,7 +170,7 @@ func (c *Client) evaluateShared(
 		content, err := interpolateTemplate(msg.Content, mergedVariables)
 		if err != nil {
 			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
-			return
+			return datamodel.Config{}, nil, nil, ldvalue.Null(), false
 		}
 		msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 	}
