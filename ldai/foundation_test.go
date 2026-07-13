@@ -218,19 +218,6 @@ func TestCompletionConfig_ModelAndProviderAccessors(t *testing.T) {
 	assert.Equal(t, "my-provider", p.Name)
 }
 
-func TestCompletionConfig_EvaluatorNeverNil(t *testing.T) {
-	client, err := NewClient(newMockSDK([]byte(`{}`), nil))
-	require.NoError(t, err)
-
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
-	assert.NotNil(t, cfg.Evaluator())
-}
-
-func TestCompletionConfig_EvaluatorNeverNilOnManuallyBuiltConfig(t *testing.T) {
-	cfg := NewConfig().Enable().Build()
-	assert.NotNil(t, cfg.Evaluator())
-}
-
 // ---------------------------------------------------------------------------
 // Typed defaults
 // ---------------------------------------------------------------------------

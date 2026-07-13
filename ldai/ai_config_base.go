@@ -36,7 +36,6 @@ type aiConfigBase struct {
 	provider       ProviderConfig
 	tools          map[string]ToolConfig
 	trackerFactory func() *Tracker
-	evaluator      *Evaluator
 }
 
 // Key returns the feature flag key used to retrieve this config.
@@ -72,6 +71,3 @@ func (b *aiConfigBase) CreateTracker() *Tracker {
 	}
 	return b.trackerFactory()
 }
-
-// Evaluator returns the evaluator associated with this config. Never returns nil.
-func (b *aiConfigBase) Evaluator() *Evaluator { return b.evaluator }
