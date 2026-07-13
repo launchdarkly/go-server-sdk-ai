@@ -704,6 +704,15 @@ func TestInterpolation(t *testing.T) {
 	})
 }
 
+func TestModeFromMetadata(t *testing.T) {
+	// Mode carried only in _ldMeta (no root-level "mode" key) must be returned by Mode().
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "mode": "agent"}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, "agent", cfg.Mode())
+}
+
 func TestParseJudgeSpecificFields(t *testing.T) {
 	json := []byte(`{
 		"_ldMeta": {"variationKey": "1", "enabled": true},

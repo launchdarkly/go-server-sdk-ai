@@ -92,7 +92,10 @@ func (c *AICompletionConfig) CustomModelParam(key string) (ldvalue.Value, bool) 
 //
 // Deprecated: The config type itself indicates the mode.
 func (c *AICompletionConfig) Mode() string {
-	return c.raw.Mode
+	if c.raw.Mode != "" {
+		return c.raw.Mode
+	}
+	return c.raw.Meta.Mode
 }
 
 // EvaluationMetricKey returns the evaluation metric key for judge mode configs.
