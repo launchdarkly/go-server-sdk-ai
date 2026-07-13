@@ -630,17 +630,3 @@ func TestExplicitVersionZeroPreserved(t *testing.T) {
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 	assert.Equal(t, 0, cfg.Version())
 }
-
-func TestCompletionConfig_EvaluatorNeverNil(t *testing.T) {
-	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true}}`)
-	client, err := NewClient(newMockSDK(raw, nil))
-	require.NoError(t, err)
-
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
-	assert.NotNil(t, cfg.Evaluator())
-}
-
-func TestCompletionConfig_EvaluatorNeverNilOnManuallyBuiltConfig(t *testing.T) {
-	cfg := NewConfig().Build()
-	assert.NotNil(t, cfg.Evaluator())
-}
