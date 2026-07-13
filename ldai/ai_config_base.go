@@ -31,7 +31,7 @@ type aiConfigBase struct {
 	key            string
 	enabled        bool
 	variationKey   string
-	version        *int
+	version        int
 	model          ModelConfig
 	provider       ProviderConfig
 	tools          map[string]ToolConfig

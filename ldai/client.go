@@ -338,13 +338,12 @@ func emptyToNil(tools map[string]ToolConfig) map[string]ToolConfig {
 	return tools
 }
 
-// defaultVersion returns v when non-nil, or a pointer to 1 when absent from the wire.
-func defaultVersion(v *int) *int {
+// defaultVersion returns the dereferenced version, or 1 when absent from the wire.
+func defaultVersion(v *int) int {
 	if v == nil {
-		one := 1
-		return &one
+		return 1
 	}
-	return v
+	return *v
 }
 
 // returnJudgeDefault builds an AIJudgeConfig from the provided default, wires a tracker factory,
@@ -366,7 +365,7 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 		evaluationMetricKey: def.evaluationMetricKey,
 	}
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, *cfg.version, context, &cfg, c.logger, "")
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
 	}
 	return cfg
 }
@@ -432,7 +431,7 @@ func (c *Client) JudgeConfig(
 		evaluationMetricKey: metricKey,
 	}
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, *cfg.version, context, &cfg, c.logger, "")
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
 	}
 	return cfg
 }

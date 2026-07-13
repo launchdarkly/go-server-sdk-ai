@@ -50,7 +50,7 @@ func (c *AICompletionConfig) VariationKey() string {
 //
 // Deprecated: This is an internal implementation detail.
 func (c *AICompletionConfig) Version() int {
-	return *c.version
+	return c.version
 }
 
 // ModelName returns the model name associated with the config.
