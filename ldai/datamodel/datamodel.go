@@ -16,6 +16,10 @@ type Meta struct {
 
 	// Version is the version of the Variation.
 	Version *int `json:"version,omitempty"`
+
+	// Mode is the AI Config mode (e.g., "completion", "agent", "judge").
+	// A missing mode defaults to "completion".
+	Mode string `json:"mode,omitempty"`
 }
 
 // Model defines the serialization format for a model.

@@ -12,12 +12,14 @@ import (
 // It is returned when LaunchDarkly is unreachable or the flag cannot be evaluated.
 // By default the config is enabled; use Disabled to obtain a disabled default.
 type AICompletionConfigDefault struct {
-	enabled      bool
-	messages     []datamodel.Message
-	modelName    string
-	modelParams  map[string]ldvalue.Value
-	modelCustom  map[string]ldvalue.Value
-	providerName string
+	enabled            bool
+	messages           []datamodel.Message
+	modelName          string
+	modelParams        map[string]ldvalue.Value
+	modelCustom        map[string]ldvalue.Value
+	providerName       string
+	tools              map[string]datamodel.Tool
+	judgeConfiguration *datamodel.JudgeConfiguration
 }
 
 // NewAICompletionConfigDefault returns a new enabled AICompletionConfigDefault.
@@ -71,6 +73,22 @@ func (d AICompletionConfigDefault) WithCustomModelParam(key string, value ldvalu
 	return d
 }
 
+// WithTool adds a tool definition to the default. The tool is keyed by its Name field.
+// Call this multiple times to add multiple tools.
+func (d AICompletionConfigDefault) WithTool(t datamodel.Tool) AICompletionConfigDefault {
+	cloned := make(map[string]datamodel.Tool, len(d.tools)+1)
+	maps.Copy(cloned, d.tools)
+	cloned[t.Name] = t
+	d.tools = cloned
+	return d
+}
+
+// WithJudgeConfiguration sets the judge configuration. The provided value is defensively copied.
+func (d AICompletionConfigDefault) WithJudgeConfiguration(jc *datamodel.JudgeConfiguration) AICompletionConfigDefault {
+	d.judgeConfiguration = jc.Clone()
+	return d
+}
+
 // Disabled returns a copy of this default with enabled set to false.
 func (d AICompletionConfigDefault) Disabled() AICompletionConfigDefault {
 	d.enabled = false
@@ -87,7 +105,9 @@ func (d AICompletionConfigDefault) AsLdValue() ldvalue.Value {
 			Parameters: maps.Clone(d.modelParams),
 			Custom:     maps.Clone(d.modelCustom),
 		},
-		Provider: datamodel.Provider{Name: d.providerName},
+		Provider:           datamodel.Provider{Name: d.providerName},
+		Tools:              maps.Clone(d.tools),
+		JudgeConfiguration: d.judgeConfiguration.Clone(),
 	})
 }
 
@@ -181,7 +201,7 @@ func (d AIAgentConfigDefault) Disabled() AIAgentConfigDefault {
 // AsLdValue serializes this default as an ldvalue.Value for use as a JSONVariation fallback.
 func (d AIAgentConfigDefault) AsLdValue() ldvalue.Value {
 	return ldvalue.FromJSONMarshal(datamodel.Config{
-		Meta: datamodel.Meta{Enabled: d.enabled},
+		Meta: datamodel.Meta{Enabled: d.enabled, Mode: "agent"},
 		Model: datamodel.Model{
 			Name:       d.modelName,
 			Parameters: maps.Clone(d.modelParams),
@@ -189,7 +209,6 @@ func (d AIAgentConfigDefault) AsLdValue() ldvalue.Value {
 		},
 		Provider:           datamodel.Provider{Name: d.providerName},
 		Instructions:       d.instructions,
-		Mode:               "agent",
 		Tools:              maps.Clone(d.tools),
 		JudgeConfiguration: d.judgeConfiguration.Clone(),
 	})
@@ -275,7 +294,7 @@ func (d AIJudgeConfigDefault) Disabled() AIJudgeConfigDefault {
 func (d AIJudgeConfigDefault) AsLdValue() ldvalue.Value {
 	return ldvalue.FromJSONMarshal(datamodel.Config{
 		Messages: slices.Clone(d.messages),
-		Meta:     datamodel.Meta{Enabled: d.enabled},
+		Meta:     datamodel.Meta{Enabled: d.enabled, Mode: "judge"},
 		Model: datamodel.Model{
 			Name:       d.modelName,
 			Parameters: maps.Clone(d.modelParams),
@@ -283,6 +302,5 @@ func (d AIJudgeConfigDefault) AsLdValue() ldvalue.Value {
 		},
 		Provider:            datamodel.Provider{Name: d.providerName},
 		EvaluationMetricKey: d.evaluationMetricKey,
-		Mode:                "judge",
 	})
 }

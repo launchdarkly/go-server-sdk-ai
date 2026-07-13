@@ -117,6 +117,7 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 // returns the resulting Config. Used for all error-path returns in evaluateConfig.
 func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
 	def.key = key
+	def.evaluator = &Evaluator{}
 	def.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger, "")
 	}
@@ -192,8 +193,9 @@ func (c *Client) evaluateConfig(
 				Parameters: maps.Clone(parsed.Model.Parameters),
 				Custom:     maps.Clone(parsed.Model.Custom),
 			},
-			provider: ProviderConfig{Name: parsed.Provider.Name},
-			tools:    tools,
+			provider:  ProviderConfig{Name: parsed.Provider.Name},
+			tools:     tools,
+			evaluator: &Evaluator{},
 		},
 		messages:             interpolatedMessages,
 		judgeConfiguration:   parsed.JudgeConfiguration.Clone(),

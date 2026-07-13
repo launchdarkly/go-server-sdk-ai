@@ -350,6 +350,34 @@ func TestAICompletionConfigDefault_AsLdValueRoundTrip(t *testing.T) {
 	assert.Equal(t, datamodel.User, dm.Messages[0].Role)
 }
 
+func TestAICompletionConfigDefault_WithTool(t *testing.T) {
+	tool := datamodel.Tool{Name: "search", Description: "Web search", Type: "function"}
+	d := NewAICompletionConfigDefault().WithTool(tool)
+	v := d.AsLdValue()
+
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+	require.Len(t, dm.Tools, 1)
+	assert.Equal(t, "search", dm.Tools["search"].Name)
+	assert.Equal(t, "Web search", dm.Tools["search"].Description)
+	assert.Equal(t, "function", dm.Tools["search"].Type)
+}
+
+func TestAICompletionConfigDefault_WithJudgeConfiguration(t *testing.T) {
+	jc := &datamodel.JudgeConfiguration{
+		Judges: []datamodel.Judge{{Key: "my-judge", SamplingRate: 0.5}},
+	}
+	d := NewAICompletionConfigDefault().WithJudgeConfiguration(jc)
+	v := d.AsLdValue()
+
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+	require.NotNil(t, dm.JudgeConfiguration)
+	require.Len(t, dm.JudgeConfiguration.Judges, 1)
+	assert.Equal(t, "my-judge", dm.JudgeConfiguration.Judges[0].Key)
+	assert.Equal(t, 0.5, dm.JudgeConfiguration.Judges[0].SamplingRate)
+}
+
 func TestAIAgentConfigDefault_Disabled(t *testing.T) {
 	d := NewAIAgentConfigDefault().Disabled()
 	v := d.AsLdValue()
@@ -357,7 +385,8 @@ func TestAIAgentConfigDefault_Disabled(t *testing.T) {
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.False(t, dm.Meta.Enabled)
-	assert.Equal(t, "agent", dm.Mode)
+	assert.Equal(t, "agent", dm.Meta.Mode)
+	assert.Empty(t, dm.Mode, "mode must not appear at root level")
 }
 
 func TestAIAgentConfigDefault_WithInstructions(t *testing.T) {
@@ -379,7 +408,8 @@ func TestAIJudgeConfigDefault_AsLdValueRoundTrip(t *testing.T) {
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.Equal(t, "toxicity", dm.EvaluationMetricKey)
-	assert.Equal(t, "judge", dm.Mode)
+	assert.Equal(t, "judge", dm.Meta.Mode)
+	assert.Empty(t, dm.Mode, "mode must not appear at root level")
 	require.Len(t, dm.Messages, 1)
 	assert.Equal(t, "Judge this:", dm.Messages[0].Content)
 }
@@ -391,6 +421,34 @@ func TestAIJudgeConfigDefault_Disabled(t *testing.T) {
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.False(t, dm.Meta.Enabled)
+}
+
+func TestAgentDefault_ModeInMeta(t *testing.T) {
+	v := NewAIAgentConfigDefault().AsLdValue()
+
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+	assert.Equal(t, "agent", dm.Meta.Mode)
+	assert.Empty(t, dm.Mode, "mode must not appear at root level")
+}
+
+func TestJudgeDefault_ModeInMeta(t *testing.T) {
+	v := NewAIJudgeConfigDefault().AsLdValue()
+
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+	assert.Equal(t, "judge", dm.Meta.Mode)
+	assert.Empty(t, dm.Mode, "mode must not appear at root level")
+}
+
+func TestCompletionDefault_NoModeKey(t *testing.T) {
+	// Completion is the implicit default; no mode field should appear anywhere.
+	v := NewAICompletionConfigDefault().AsLdValue()
+
+	var dm datamodel.Config
+	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
+	assert.Empty(t, dm.Meta.Mode)
+	assert.Empty(t, dm.Mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,4 +629,18 @@ func TestExplicitVersionZeroPreserved(t *testing.T) {
 
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 	assert.Equal(t, 0, cfg.Version())
+}
+
+func TestCompletionConfig_EvaluatorNeverNil(t *testing.T) {
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.NotNil(t, cfg.Evaluator())
+}
+
+func TestCompletionConfig_EvaluatorNeverNilOnManuallyBuiltConfig(t *testing.T) {
+	cfg := NewConfig().Build()
+	assert.NotNil(t, cfg.Evaluator())
 }

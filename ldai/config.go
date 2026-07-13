@@ -145,7 +145,8 @@ func (cb *ConfigBuilder) Build() Config {
 	}
 	return AICompletionConfig{
 		aiConfigBase: aiConfigBase{
-			enabled: cb.enabled,
+			enabled:   cb.enabled,
+			evaluator: &Evaluator{},
 			model: ModelConfig{
 				Name:       cb.modelName,
 				Parameters: maps.Clone(cb.modelParams),

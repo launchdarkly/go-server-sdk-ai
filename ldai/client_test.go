@@ -156,7 +156,7 @@ func TestExplicitVersionZeroInTracker(t *testing.T) {
 	require.Equal(t, 0, cfg.Version())
 
 	events := newMockEvents()
-	tracker := newTracker(events, newRunID(), "key", cfg.VariationKey(), cfg.Version(), ldcontext.New("user"), &cfg, nil)
+	tracker := newTracker(events, newRunID(), "key", cfg.VariationKey(), cfg.Version(), ldcontext.New("user"), &cfg, nil, "")
 	_ = tracker.TrackSuccess()
 
 	require.Len(t, events.events, 1)

@@ -35,6 +35,7 @@ type aiConfigBase struct {
 	model          ModelConfig
 	provider       ProviderConfig
 	tools          map[string]ToolConfig
+	evaluator      *Evaluator
 	trackerFactory func() *Tracker
 }
 
@@ -59,6 +60,9 @@ func (b *aiConfigBase) Provider() ProviderConfig { return b.provider }
 // Tools returns a defensive copy of the root-level tools map.
 // This is distinct from model.parameters.tools which is passed to LLM providers verbatim.
 func (b *aiConfigBase) Tools() map[string]ToolConfig { return maps.Clone(b.tools) }
+
+// Evaluator returns the noop evaluator attached to this config. Never returns nil.
+func (b *aiConfigBase) Evaluator() *Evaluator { return b.evaluator }
 
 // CreateTracker returns a new Tracker for a fresh AI run. Each call mints a new runId (a
 // UUIDv4) that LaunchDarkly uses to correlate the run's events in metrics views. Call this
