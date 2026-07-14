@@ -4,7 +4,6 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 )
@@ -41,24 +40,9 @@ func NewConfig() *ConfigBuilder {
 	}
 }
 
-// Disabled returns an AICompletionConfigDefault that is disabled and contains no messages.
-// It is a convenience constructor equivalent to NewAICompletionConfigDefault().Disabled().
-//
-// Deprecated: Use NewAICompletionConfigDefault().Disabled() instead.
-func Disabled() AICompletionConfigDefault {
-	return NewAICompletionConfigDefault().Disabled()
-}
-
-// Config is a deprecated alias for Client.CompletionConfig. Use CompletionConfig instead.
-//
-// Deprecated: Use Client.CompletionConfig instead.
-func (c *Client) Config(
-	key string,
-	context ldcontext.Context,
-	defaultValue AICompletionConfigDefault,
-	variables map[string]interface{},
-) Config {
-	return c.CompletionConfig(key, context, defaultValue, variables)
+// Disabled is a helper that returns a built Config that is disabled and contains no messages.
+func Disabled() Config {
+	return NewConfig().Disable().Build()
 }
 
 // WithMessage appends a message to the config with the given role.

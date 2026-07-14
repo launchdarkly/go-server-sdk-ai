@@ -56,7 +56,6 @@ const (
 	sdkInfoEvent          = "$ld:ai:sdk:info"
 	usageCompletionConfig = "$ld:ai:usage:completion-config"
 	usageJudgeConfig      = "$ld:ai:usage:judge-config"
-	usageAgentConfig      = "$ld:ai:usage:agent-config"
 )
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
@@ -93,17 +92,17 @@ func (c *Client) logConfigWarning(key string, format string, args ...interface{}
 	c.logger.Warnf(prefix+format, args...)
 }
 
-// CompletionConfig retrieves an AI completion config and interpolates its message templates using
-// the provided variables. Returns the default value if the config cannot be evaluated. Template
-// interpolation is not applied to the default value's messages.
+// CompletionConfig retrieves an AI Config and interpolates its message templates using the provided
+// variables. Returns the default value if the config cannot be evaluated. Template interpolation is
+// not applied to the default value's messages.
 //
-// To send analytic events to LaunchDarkly, call CreateTracker on the returned AICompletionConfig to obtain a Tracker.
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned Config to obtain a Tracker.
 func (c *Client) CompletionConfig(
 	key string,
 	context ldcontext.Context,
-	defaultValue AICompletionConfigDefault,
+	defaultValue Config,
 	variables map[string]interface{},
-) AICompletionConfig {
+) Config {
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageCompletionConfig, context, 1, data)
 	return c.evaluateConfig(key, context, defaultValue, variables)
@@ -115,42 +114,14 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 	return TrackerFromResumptionToken(token, c.sdk, context)
 }
 
-// returnDefault builds an AICompletionConfig from the provided default, wires a tracker factory,
-// and returns it. Used for all error-path returns in evaluateConfig.
-func (c *Client) returnDefault(key string, context ldcontext.Context, def AICompletionConfigDefault) AICompletionConfig {
-	raw := datamodel.Config{
-		Messages: slices.Clone(def.messages),
-		Meta:     datamodel.Meta{Enabled: def.enabled},
-		Model: datamodel.Model{
-			Name:       def.modelName,
-			Parameters: maps.Clone(def.modelParams),
-			Custom:     maps.Clone(def.modelCustom),
-		},
-		Provider:           datamodel.Provider{Name: def.providerName},
-		Tools:              maps.Clone(def.tools),
-		JudgeConfiguration: def.judgeConfiguration.Clone(),
+// returnDefault sets a tracker factory on a copy of def (so CreateTracker always works) and
+// returns the resulting Config. Used for all error-path returns in evaluateConfig.
+func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
+	def.key = key
+	def.trackerFactory = func() *Tracker {
+		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger, "")
 	}
-	cfg := AICompletionConfig{
-		aiConfigBase: aiConfigBase{
-			key:     key,
-			enabled: def.enabled,
-			version: defaultVersion(nil),
-			model: ModelConfig{
-				Name:       def.modelName,
-				Parameters: maps.Clone(def.modelParams),
-				Custom:     maps.Clone(def.modelCustom),
-			},
-			provider: ProviderConfig{Name: def.providerName},
-			tools:    c.resolveTools(key, ldvalue.FromJSONMarshal(raw)),
-		},
-		messages:           slices.Clone(def.messages),
-		judgeConfiguration: def.judgeConfiguration.Clone(),
-		raw:                raw,
-	}
-	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger, "")
-	}
-	return cfg
+	return def
 }
 
 // evaluateShared fetches, validates, unmarshals, and interpolates a config. On any failure it
@@ -206,14 +177,14 @@ func (c *Client) evaluateShared(
 	return parsed, msgs, c.resolveTools(key, result), true
 }
 
-// evaluateConfig fetches and interpolates a completion config without emitting any metric.
-// CompletionConfig emits its own metric before calling this.
+// evaluateConfig fetches and interpolates an AI Config without emitting any metric.
+// Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
 func (c *Client) evaluateConfig(
 	key string,
 	context ldcontext.Context,
-	defaultValue AICompletionConfigDefault,
+	defaultValue Config,
 	variables map[string]interface{},
-) AICompletionConfig {
+) Config {
 	parsed, interpolatedMessages, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
 	if !ok {
 		return c.returnDefault(key, context, defaultValue)
@@ -376,7 +347,7 @@ func defaultVersion(v *int) int {
 }
 
 // returnJudgeDefault builds an AIJudgeConfig from the provided default, wires a tracker factory,
-// and returns it. Used for all error-path returns in evaluateJudgeConfig.
+// and returns it. Used for all error-path returns in JudgeConfig.
 func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def AIJudgeConfigDefault) AIJudgeConfig {
 	cfg := AIJudgeConfig{
 		aiConfigBase: aiConfigBase{
@@ -389,7 +360,6 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 				Custom:     maps.Clone(def.modelCustom),
 			},
 			provider: ProviderConfig{Name: def.providerName},
-			tools:    c.resolveTools(key, def.AsLdValue()),
 		},
 		messages:            slices.Clone(def.messages),
 		evaluationMetricKey: def.evaluationMetricKey,
@@ -400,18 +370,21 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 	return cfg
 }
 
-// evaluateJudgeConfig is the internal helper shared by JudgeConfig (Task 03) and future
-// JudgeConfigTemplate / CreateJudge callers (Tasks 04/05) that need to build a judge config
-// without re-emitting the usage event.
-func (c *Client) evaluateJudgeConfig(
+// JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved
+// variables message_history and response_to_evaluate are preserved as literal placeholders for
+// substitution by Judge.buildMessages during evaluation.
+//
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIJudgeConfig to obtain a Tracker.
+func (c *Client) JudgeConfig(
 	key string,
 	context ldcontext.Context,
 	defaultValue AIJudgeConfigDefault,
 	variables map[string]interface{},
 ) AIJudgeConfig {
-	// Extend variables with reserved judge placeholders so that {{message_history}} and
-	// {{response_to_evaluate}} survive the first Mustache pass for substitution by
-	// Judge.buildMessages during evaluation.
+	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
+	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
+
+	// Extend variables with reserved judge placeholders.
 	extendedVariables := make(map[string]interface{})
 	for k, v := range variables {
 		if k == "message_history" || k == "response_to_evaluate" {
@@ -425,12 +398,6 @@ func (c *Client) evaluateJudgeConfig(
 
 	parsed, interpolated, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables)
 	if !ok {
-		return c.returnJudgeDefault(key, context, defaultValue)
-	}
-
-	// Mode-mismatch validation: accept "judge" or "" (back-compat); fall back on mismatch.
-	if parsed.Meta.Mode != "judge" && parsed.Meta.Mode != "" {
-		c.logConfigWarning(key, "expected mode %q but got %q; using default", "judge", parsed.Meta.Mode)
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
 
@@ -467,145 +434,4 @@ func (c *Client) evaluateJudgeConfig(
 		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
 	}
 	return cfg
-}
-
-// JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved
-// variables message_history and response_to_evaluate are preserved as literal placeholders for
-// substitution by Judge.buildMessages during evaluation.
-//
-// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIJudgeConfig to obtain a Tracker.
-func (c *Client) JudgeConfig(
-	key string,
-	context ldcontext.Context,
-	defaultValue AIJudgeConfigDefault,
-	variables map[string]interface{},
-) AIJudgeConfig {
-	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
-	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
-	return c.evaluateJudgeConfig(key, context, defaultValue, variables)
-}
-
-// returnAgentDefault builds an AIAgentConfig from the provided default, wires a tracker factory,
-// and returns it. Used for all error-path returns in evaluateAgentConfig.
-func (c *Client) returnAgentDefault(
-	key string,
-	context ldcontext.Context,
-	def AIAgentConfigDefault,
-	graphKey string,
-) AIAgentConfig {
-	cfg := AIAgentConfig{
-		aiConfigBase: aiConfigBase{
-			key:     key,
-			enabled: def.enabled,
-			version: defaultVersion(nil),
-			model: ModelConfig{
-				Name:       def.modelName,
-				Parameters: maps.Clone(def.modelParams),
-				Custom:     maps.Clone(def.modelCustom),
-			},
-			provider: ProviderConfig{Name: def.providerName},
-			tools:    c.resolveTools(key, def.AsLdValue()),
-		},
-		instructions:       def.instructions,
-		judgeConfiguration: def.judgeConfiguration.Clone(),
-	}
-	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, graphKey)
-	}
-	return cfg
-}
-
-// evaluateAgentConfig is the internal helper shared by AgentConfig (Task 03) and future
-// graph node construction (Task 06) that needs to build an agent config without re-emitting
-// the usage event. graphKey is set by graph-node construction; empty for standalone calls.
-func (c *Client) evaluateAgentConfig(
-	key string,
-	context ldcontext.Context,
-	defaultValue AIAgentConfigDefault,
-	variables map[string]interface{},
-	graphKey string,
-) AIAgentConfig {
-	parsed, _, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
-	if !ok {
-		return c.returnAgentDefault(key, context, defaultValue, graphKey)
-	}
-
-	// Mode-mismatch validation: accept "agent" or "" (back-compat); fall back on mismatch.
-	if parsed.Meta.Mode != "agent" && parsed.Meta.Mode != "" {
-		c.logConfigWarning(key, "expected mode %q but got %q; using default", "agent", parsed.Meta.Mode)
-		return c.returnAgentDefault(key, context, defaultValue, graphKey)
-	}
-
-	// Interpolate the instructions template using the same Mustache engine and merged
-	// variable map (ldctx + user vars) used for messages in evaluateShared. ldctx is always
-	// available regardless of whether the caller provided any user variables.
-	instructions := parsed.Instructions
-	if instructions != "" {
-		mergedVars := map[string]interface{}{ldContextVariable: getAllAttributes(context)}
-		for k, v := range variables {
-			if k != ldContextVariable {
-				mergedVars[k] = v
-			}
-		}
-		if interpolated, err := interpolateTemplate(instructions, mergedVars); err == nil {
-			instructions = interpolated
-		} else {
-			c.logConfigWarning(key, "malformed instructions template: %v", err)
-			return c.returnAgentDefault(key, context, defaultValue, graphKey)
-		}
-	}
-
-	cfg := AIAgentConfig{
-		aiConfigBase: aiConfigBase{
-			key:          key,
-			enabled:      parsed.Meta.Enabled,
-			variationKey: parsed.Meta.VariationKey,
-			version:      defaultVersion(parsed.Meta.Version),
-			model: ModelConfig{
-				Name:       parsed.Model.Name,
-				Parameters: maps.Clone(parsed.Model.Parameters),
-				Custom:     maps.Clone(parsed.Model.Custom),
-			},
-			provider: ProviderConfig{Name: parsed.Provider.Name},
-			tools:    tools,
-		},
-		instructions:       instructions,
-		judgeConfiguration: parsed.JudgeConfiguration.Clone(),
-	}
-	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, graphKey)
-	}
-	return cfg
-}
-
-// AgentConfig retrieves an AI agent config and interpolates its instruction template using the
-// provided variables. Returns the default value if the config cannot be evaluated.
-//
-// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIAgentConfig to obtain a Tracker.
-func (c *Client) AgentConfig(
-	key string,
-	context ldcontext.Context,
-	defaultValue AIAgentConfigDefault,
-	variables map[string]interface{},
-) AIAgentConfig {
-	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
-	_ = c.sdk.TrackMetric(usageAgentConfig, context, 1, data)
-	return c.evaluateAgentConfig(key, context, defaultValue, variables, "")
-}
-
-// AgentConfigs retrieves multiple agent configs in batch. Each key is evaluated independently;
-// failed evaluations use the corresponding default (zero-value AIAgentConfigDefault if the key
-// is absent from defaults). This does NOT emit per-key usage events; the graph method (Task 06)
-// emits its own graph-specific usage event.
-func (c *Client) AgentConfigs(
-	keys []string,
-	context ldcontext.Context,
-	defaults map[string]AIAgentConfigDefault,
-	variables map[string]interface{},
-) map[string]AIAgentConfig {
-	result := make(map[string]AIAgentConfig, len(keys))
-	for _, key := range keys {
-		result[key] = c.evaluateAgentConfig(key, context, defaults[key], variables, "")
-	}
-	return result
 }
