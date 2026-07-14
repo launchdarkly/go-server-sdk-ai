@@ -1539,21 +1539,21 @@ func TestAgentConfig_ModeEmpty(t *testing.T) {
 
 // ---- AgentConfigs batch tests ----
 
-// TestAgentConfigs_Batch verifies that all keys are resolved and missing defaults use zero-value.
+// TestAgentConfigs_Batch verifies that all requests are resolved with their own defaults/variables.
 func TestAgentConfigs_Batch(t *testing.T) {
 	// Use an error SDK so every key falls back to its default; simplifies assertions.
 	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
 	client, err := NewClient(mockSDK)
 	require.NoError(t, err)
+	mockSDK.events = nil
 
-	keys := []string{"agent-a", "agent-b", "agent-c"}
-	defaults := map[string]AIAgentConfigDefault{
-		"agent-a": NewAIAgentConfigDefault().WithInstructions("A instructions."),
-		"agent-b": NewAIAgentConfigDefault().WithInstructions("B instructions."),
-		// "agent-c" intentionally absent — zero-value default
+	requests := []AgentConfigRequest{
+		{Key: "agent-a", DefaultValue: NewAIAgentConfigDefault().WithInstructions("A instructions.")},
+		{Key: "agent-b", DefaultValue: NewAIAgentConfigDefault().WithInstructions("B instructions.")},
+		{Key: "agent-c"}, // zero-value DefaultValue
 	}
 
-	result := client.AgentConfigs(keys, ldcontext.New("user"), defaults, nil)
+	result := client.AgentConfigs(requests, ldcontext.New("user"))
 
 	require.Len(t, result, 3)
 	// Map values are not addressable, so copy to local vars before calling pointer receivers.
@@ -1564,26 +1564,31 @@ func TestAgentConfigs_Batch(t *testing.T) {
 	assert.NotNil(t, cfgA.CreateTracker())
 	assert.NotNil(t, cfgB.CreateTracker())
 	assert.NotNil(t, cfgC.CreateTracker())
+
+	// Verify the single batch usage event was emitted with the request count.
+	require.Len(t, mockSDK.events, 1)
+	evt := mockSDK.events[0]
+	assert.Equal(t, "$ld:ai:usage:agent-configs", evt.eventName)
+	assert.Equal(t, float64(3), evt.metricValue)
+	assert.Equal(t, ldvalue.Int(3), evt.data)
 }
 
-// TestAgentConfigs_DoesNotEmitUsageEvents verifies that AgentConfigs does not fire
-// $ld:ai:usage:agent-config events (unlike the singular AgentConfig).
-func TestAgentConfigs_DoesNotEmitUsageEvents(t *testing.T) {
+// TestAgentConfigs_DoesNotEmitPerKeyUsageEvents verifies that AgentConfigs does not fire
+// $ld:ai:usage:agent-config events per key — only the single batch event is emitted.
+func TestAgentConfigs_DoesNotEmitPerKeyUsageEvents(t *testing.T) {
 	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
 	client, err := NewClient(mockSDK)
 	require.NoError(t, err)
 	mockSDK.events = nil
 
 	client.AgentConfigs(
-		[]string{"k1", "k2"},
+		[]AgentConfigRequest{{Key: "k1"}, {Key: "k2"}},
 		ldcontext.New("user"),
-		map[string]AIAgentConfigDefault{},
-		nil,
 	)
 
 	for _, e := range mockSDK.events {
 		assert.NotEqual(t, "$ld:ai:usage:agent-config", e.eventName,
-			"AgentConfigs must not emit per-key usage events")
+			"AgentConfigs must not emit per-key agent-config events")
 	}
 }
 

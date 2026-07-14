@@ -57,6 +57,7 @@ const (
 	usageCompletionConfig = "$ld:ai:usage:completion-config"
 	usageJudgeConfig      = "$ld:ai:usage:judge-config"
 	usageAgentConfig      = "$ld:ai:usage:agent-config"
+	usageAgentConfigs     = "$ld:ai:usage:agent-configs"
 )
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
@@ -117,7 +118,11 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 
 // returnDefault builds an AICompletionConfig from the provided default, wires a tracker factory,
 // and returns it. Used for all error-path returns in evaluateConfig.
-func (c *Client) returnDefault(key string, context ldcontext.Context, def AICompletionConfigDefault) AICompletionConfig {
+func (c *Client) returnDefault(
+	key string,
+	context ldcontext.Context,
+	def AICompletionConfigDefault,
+) AICompletionConfig {
 	raw := datamodel.Config{
 		Messages: slices.Clone(def.messages),
 		Meta:     datamodel.Meta{Enabled: def.enabled},
@@ -593,19 +598,27 @@ func (c *Client) AgentConfig(
 	return c.evaluateAgentConfig(key, context, defaultValue, variables, "")
 }
 
-// AgentConfigs retrieves multiple agent configs in batch. Each key is evaluated independently;
-// failed evaluations use the corresponding default (zero-value AIAgentConfigDefault if the key
-// is absent from defaults). This does NOT emit per-key usage events; the graph method (Task 06)
-// emits its own graph-specific usage event.
+// AgentConfigRequest pairs a flag key with its per-agent default and interpolation variables for
+// use with AgentConfigs. Each request is evaluated independently.
+type AgentConfigRequest struct {
+	Key          string
+	DefaultValue AIAgentConfigDefault
+	Variables    map[string]interface{}
+}
+
+// AgentConfigs retrieves multiple agent configs in batch. Each request is evaluated independently
+// using its own default and variables; failed evaluations use the request's DefaultValue.
+// Emits a single $ld:ai:usage:agent-configs event with the count of requested agents.
+// Does NOT emit per-agent $ld:ai:usage:agent-config events.
 func (c *Client) AgentConfigs(
-	keys []string,
+	requests []AgentConfigRequest,
 	context ldcontext.Context,
-	defaults map[string]AIAgentConfigDefault,
-	variables map[string]interface{},
 ) map[string]AIAgentConfig {
-	result := make(map[string]AIAgentConfig, len(keys))
-	for _, key := range keys {
-		result[key] = c.evaluateAgentConfig(key, context, defaults[key], variables, "")
+	count := len(requests)
+	_ = c.sdk.TrackMetric(usageAgentConfigs, context, float64(count), ldvalue.Int(count))
+	result := make(map[string]AIAgentConfig, count)
+	for _, req := range requests {
+		result[req.Key] = c.evaluateAgentConfig(req.Key, context, req.DefaultValue, req.Variables, "")
 	}
 	return result
 }
