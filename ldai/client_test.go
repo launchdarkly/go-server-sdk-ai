@@ -96,14 +96,14 @@ func TestEvalErrorReturnsDefault(t *testing.T) {
 	require.NotNil(t, client)
 
 	// The literal {{x}} must survive: interpolation is not applied to the default value's messages.
-	defaultVal := NewConfig().Enable().WithMessage("hello {{x}}", datamodel.User).Build()
+	def := NewAICompletionConfigDefault().WithMessage("hello {{x}}", datamodel.User)
 
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 	assert.NotNil(t, cfg.CreateTracker())
-	assert.Equal(t, defaultVal.Enabled(), cfg.Enabled())
-	assert.Equal(t, defaultVal.Messages(), cfg.Messages())
-	assert.Equal(t, defaultVal.ModelName(), cfg.ModelName())
-	assert.Equal(t, defaultVal.ProviderName(), cfg.ProviderName())
+	assert.True(t, cfg.Enabled())
+	assert.Equal(t, []datamodel.Message{{Content: "hello {{x}}", Role: datamodel.User}}, cfg.Messages())
+	assert.Equal(t, "", cfg.ModelName())
+	assert.Equal(t, "", cfg.ProviderName())
 }
 
 func TestInterpolationDoesNotHTMLEscape(t *testing.T) {
@@ -136,9 +136,9 @@ func TestInterpolationDoesNotHTMLEscape(t *testing.T) {
 }
 
 func TestConfigExposesVariationKeyAndVersion(t *testing.T) {
-	json := []byte(`{"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 5}}`)
+	raw := []byte(`{"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 5}}`)
 
-	client, err := NewClient(newMockSDK(json, nil))
+	client, err := NewClient(newMockSDK(raw, nil))
 	require.NoError(t, err)
 
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
@@ -230,8 +230,7 @@ func TestParseModelName(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
-			defaultVal := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
-			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(), nil)
 
 			assert.Equal(t, test.expected, cfg.ModelName())
 		})
@@ -254,8 +253,7 @@ func TestParseProviderName(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
-			defaultVal := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
-			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(), nil)
 
 			assert.Equal(t, test.expected, cfg.ProviderName())
 		})
@@ -281,11 +279,11 @@ func TestParseInvalidConfigReturnsDefault(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
-			defaultVal := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
+			def := NewAICompletionConfigDefault().WithMessage("hello", datamodel.User)
 
-			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 			// Verify config data matches the default
-			assert.Equal(t, defaultVal.AsLdValue(), cfg.AsLdValue())
+			assert.Equal(t, def.AsLdValue(), cfg.AsLdValue())
 			// Verify CreateTracker() now works (returnDefault always injects a factory)
 			assert.NotNil(t, cfg.CreateTracker())
 
@@ -305,7 +303,7 @@ func TestParseDisabledConfigs(t *testing.T) {
 		{"meta disable implicitly", []byte(`{"meta": { "variationKey": "1"}, "model": {}, "messages": []}`)},
 	}
 
-	defaultVal := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
+	def := NewAICompletionConfigDefault().WithMessage("hello", datamodel.User)
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -313,7 +311,7 @@ func TestParseDisabledConfigs(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
-			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 			// We *shouldn't* be getting the default value, because these are all valid configs that should
 			// be parsed as disabled.
@@ -342,8 +340,7 @@ func TestParseModelParams(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
-			defaultVal := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
-			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(), nil)
 
 			for k, v := range test.expected {
 				p, ok := cfg.ModelParam(k)
@@ -375,8 +372,7 @@ func TestParseCustomModelParams(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, client)
 
-			defaultVal := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
-			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(), nil)
 
 			for k, v := range test.expected {
 				p, ok := cfg.CustomModelParam(k)
@@ -393,13 +389,13 @@ func TestCanSetDefaultConfigFields(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	defaultVal := NewConfig().Enable().
+	def := NewAICompletionConfigDefault().
 		WithMessage("hello", datamodel.User).
 		WithMessage("world", datamodel.System).
 		WithProviderName("provider").
-		WithModelName("model").Build()
+		WithModelName("model")
 
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 	assert.True(t, cfg.Enabled())
 	assert.Equal(t, "provider", cfg.ProviderName())
@@ -422,7 +418,7 @@ func TestCompletionConfigMethodTracking(t *testing.T) {
 	// Clear the SDK info event from construction.
 	mockSDK.events = nil
 
-	defaultConfig := NewConfig().WithEnabled(false).Build()
+	defaultConfig := NewAICompletionConfigDefault().Disabled()
 	context := ldcontext.New("user-key")
 	configKey := "test-config-key"
 
@@ -487,8 +483,8 @@ func TestCanSetModelParameters(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	defaultVal := NewConfig().WithModelParam("foo", ldvalue.String("bar")).Build()
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+	def := NewAICompletionConfigDefault().WithModelParam("foo", ldvalue.String("bar"))
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 	t.Run("param is present", func(t *testing.T) {
 		p, ok := cfg.ModelParam("foo")
@@ -508,8 +504,8 @@ func TestCanSetCustomModelParameters(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	defaultVal := NewConfig().WithCustomModelParam("foo", ldvalue.String("bar")).Build()
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+	def := NewAICompletionConfigDefault().WithCustomModelParam("foo", ldvalue.String("bar"))
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 	t.Run("param is present", func(t *testing.T) {
 		p, ok := cfg.CustomModelParam("foo")
@@ -529,11 +525,11 @@ func TestNormalAndCustomParamsDoNotInterfere(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	defaultVal := NewConfig().
+	def := NewAICompletionConfigDefault().
 		WithModelParam("foo", ldvalue.String("bar")).
-		WithCustomModelParam("foo", ldvalue.String("baz")).Build()
+		WithCustomModelParam("foo", ldvalue.String("baz"))
 
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 	foo1, ok := cfg.ModelParam("foo")
 	require.True(t, ok)
@@ -549,10 +545,9 @@ func TestCannotOverwriteMessages(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, client)
 
-	defaultVal := NewConfig().
-		WithMessage("hello", datamodel.Assistant).Build()
+	def := NewAICompletionConfigDefault().WithMessage("hello", datamodel.Assistant)
 
-	cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 	cfg.Messages()[0].Content = "changed"
 	cfg.Messages()[0].Role = datamodel.User
@@ -1338,4 +1333,321 @@ func TestClient_CreateTracker_RoundTrip_WithGraphKey(t *testing.T) {
 	require.NotNil(t, successEvent)
 	assert.Equal(t, "my-graph", successEvent.data.GetByKey("graphKey").StringValue())
 	assert.Equal(t, "my-config", successEvent.data.GetByKey("configKey").StringValue())
+}
+
+// ---- AgentConfig tests ----
+
+// TestAgentConfig_ValidFlag verifies that AgentConfig returns a correctly populated AIAgentConfig.
+func TestAgentConfig_ValidFlag(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v-agent", "enabled": true, "version": 2, "mode": "agent"},
+		"model": {"name": "agent-model"},
+		"provider": {"name": "agent-provider"},
+		"instructions": "You are a helpful assistant.",
+		"tools": {
+			"search": {"name": "search", "description": "Search the web"}
+		}
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault(), nil)
+
+	assert.True(t, cfg.Enabled())
+	assert.Equal(t, "v-agent", cfg.variationKey)
+	assert.Equal(t, 2, cfg.version)
+	assert.Equal(t, "agent-model", cfg.Model().Name)
+	assert.Equal(t, "agent-provider", cfg.Provider().Name)
+	assert.Equal(t, "You are a helpful assistant.", cfg.Instructions())
+	require.Len(t, cfg.Tools(), 1)
+	assert.Equal(t, "search", cfg.Tools()["search"].Name())
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
+// TestAgentConfig_UsageTracking verifies that AgentConfig emits only the agent-config usage event.
+func TestAgentConfig_UsageTracking(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Hello."
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	ctx := ldcontext.New("user-key")
+	configKey := "agent-config-key"
+	client.AgentConfig(configKey, ctx, NewAIAgentConfigDefault(), nil)
+
+	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
+	require.Len(t, mockSDK.events, 1)
+	evt := mockSDK.events[0]
+	assert.Equal(t, "$ld:ai:usage:agent-config", evt.eventName)
+	assert.Equal(t, ctx, evt.context)
+	assert.Equal(t, float64(1), evt.metricValue)
+	assert.Equal(t, expectedData, evt.data)
+}
+
+// TestAgentConfig_DisabledFlag verifies that a disabled flag returns Enabled() == false.
+func TestAgentConfig_DisabledFlag(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": false, "mode": "agent"},
+		"instructions": "Disabled agent."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault(), nil)
+
+	assert.False(t, cfg.Enabled())
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
+// TestAgentConfig_DefaultPath verifies that the error/offline path returns an AIAgentConfig built
+// from the provided AIAgentConfigDefault, with a working CreateTracker().
+func TestAgentConfig_DefaultPath(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIAgentConfigDefault().
+		WithModelName("fallback-model").
+		WithProviderName("fallback-provider").
+		WithInstructions("Fallback instructions.")
+
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), def, nil)
+
+	assert.True(t, cfg.Enabled(), "default path should be enabled by default")
+	assert.Equal(t, "fallback-model", cfg.Model().Name)
+	assert.Equal(t, "fallback-provider", cfg.Provider().Name)
+	assert.Equal(t, "Fallback instructions.", cfg.Instructions())
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
+// TestAgentConfig_InstructionsInterpolation verifies that {{variable}} in instructions is
+// replaced with the provided variable value.
+func TestAgentConfig_InstructionsInterpolation(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Hello, {{name}}! You assist {{role}} users."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"),
+		NewAIAgentConfigDefault(),
+		map[string]interface{}{"name": "Alice", "role": "enterprise"},
+	)
+
+	assert.Equal(t, "Hello, Alice! You assist enterprise users.", cfg.Instructions())
+}
+
+// TestAgentConfig_InstructionsInterpolation_NoVariables verifies that instructions without
+// variables are returned verbatim (no interpolation pass is attempted).
+func TestAgentConfig_InstructionsInterpolation_NoVariables(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Static instructions."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault(), nil)
+
+	assert.Equal(t, "Static instructions.", cfg.Instructions())
+}
+
+// TestAgentConfig_InstructionsInterpolation_LdCtx verifies that ldctx context attributes are
+// available in instructions templates.
+func TestAgentConfig_InstructionsInterpolation_LdCtx(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "User key is {{ldctx.key}}."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	ctx := ldcontext.New("user-123")
+	cfg := client.AgentConfig("agent-key", ctx, NewAIAgentConfigDefault(), map[string]interface{}{})
+
+	assert.Equal(t, "User key is user-123.", cfg.Instructions())
+}
+
+// TestAgentConfig_GraphKeyPassthrough verifies that a non-empty graphKey flows from
+// evaluateAgentConfig into the tracker's event data.
+func TestAgentConfig_GraphKeyPassthrough(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Test."
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	ctx := ldcontext.New("user")
+	cfg := client.evaluateAgentConfig("agent-key", ctx, NewAIAgentConfigDefault(), nil, "my-graph")
+
+	tracker := cfg.CreateTracker()
+	require.NotNil(t, tracker)
+	require.NoError(t, tracker.TrackSuccess())
+
+	var genEvent *mockEvent
+	for i, e := range mockSDK.events {
+		if e.eventName == "$ld:ai:generation:success" {
+			genEvent = &mockSDK.events[i]
+			break
+		}
+	}
+	require.NotNil(t, genEvent)
+	assert.Equal(t, "my-graph", genEvent.data.GetByKey("graphKey").StringValue())
+}
+
+// TestAgentConfig_ModeMismatch verifies that a flag with the wrong mode falls back to the default
+// and a warning is logged.
+func TestAgentConfig_ModeMismatch(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"instructions": "Should not be used."
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIAgentConfigDefault().WithInstructions("Default instructions.")
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), def, nil)
+
+	assert.Equal(t, "Default instructions.", cfg.Instructions(),
+		"mode mismatch must fall back to default instructions")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
+}
+
+// TestAgentConfig_ModeEmpty verifies that a flag with no mode field is accepted for back-compat.
+func TestAgentConfig_ModeEmpty(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"instructions": "Back-compat instructions."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault(), nil)
+
+	assert.Equal(t, "Back-compat instructions.", cfg.Instructions(),
+		"empty mode must be accepted for backward compatibility")
+}
+
+// ---- AgentConfigs batch tests ----
+
+// TestAgentConfigs_Batch verifies that all keys are resolved and missing defaults use zero-value.
+func TestAgentConfigs_Batch(t *testing.T) {
+	// Use an error SDK so every key falls back to its default; simplifies assertions.
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	keys := []string{"agent-a", "agent-b", "agent-c"}
+	defaults := map[string]AIAgentConfigDefault{
+		"agent-a": NewAIAgentConfigDefault().WithInstructions("A instructions."),
+		"agent-b": NewAIAgentConfigDefault().WithInstructions("B instructions."),
+		// "agent-c" intentionally absent — zero-value default
+	}
+
+	result := client.AgentConfigs(keys, ldcontext.New("user"), defaults, nil)
+
+	require.Len(t, result, 3)
+	// Map values are not addressable, so copy to local vars before calling pointer receivers.
+	cfgA, cfgB, cfgC := result["agent-a"], result["agent-b"], result["agent-c"]
+	assert.Equal(t, "A instructions.", cfgA.Instructions())
+	assert.Equal(t, "B instructions.", cfgB.Instructions())
+	assert.Equal(t, "", cfgC.Instructions(), "missing key uses zero-value default")
+	assert.NotNil(t, cfgA.CreateTracker())
+	assert.NotNil(t, cfgB.CreateTracker())
+	assert.NotNil(t, cfgC.CreateTracker())
+}
+
+// TestAgentConfigs_DoesNotEmitUsageEvents verifies that AgentConfigs does not fire
+// $ld:ai:usage:agent-config events (unlike the singular AgentConfig).
+func TestAgentConfigs_DoesNotEmitUsageEvents(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	client.AgentConfigs(
+		[]string{"k1", "k2"},
+		ldcontext.New("user"),
+		map[string]AIAgentConfigDefault{},
+		nil,
+	)
+
+	for _, e := range mockSDK.events {
+		assert.NotEqual(t, "$ld:ai:usage:agent-config", e.eventName,
+			"AgentConfigs must not emit per-key usage events")
+	}
+}
+
+// ---- Tools parity tests ----
+
+// TestToolsParity_AgentConfig verifies that Tools() is consistent between the success path and
+// the default/offline path for AgentConfig.
+func TestToolsParity_AgentConfig(t *testing.T) {
+	toolsJSON := `"tools": {"search": {"name": "search", "description": "Search the web"}}`
+
+	// Success path: tools come from the flag JSON.
+	successRaw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Test.",` + toolsJSON + `
+	}`)
+	client, err := NewClient(newMockSDK(successRaw, nil))
+	require.NoError(t, err)
+	successCfg := client.AgentConfig("k", ldcontext.New("user"), NewAIAgentConfigDefault(), nil)
+
+	// Default/offline path: tools come from AIAgentConfigDefault.
+	offlineClient, err := NewClient(newMockSDK(nil, fmt.Errorf("offline")))
+	require.NoError(t, err)
+	defWithTool := NewAIAgentConfigDefault().WithTool(datamodel.Tool{Name: "search", Description: "Search the web"})
+	defaultCfg := offlineClient.AgentConfig("k", ldcontext.New("user"), defWithTool, nil)
+
+	assert.Equal(t, len(successCfg.Tools()), len(defaultCfg.Tools()),
+		"Tools() count must match between success and default paths")
+	assert.Equal(t, "search", successCfg.Tools()["search"].Name())
+	assert.Equal(t, "search", defaultCfg.Tools()["search"].Name())
+}
+
+// ---- JudgeConfig mode-mismatch tests ----
+
+// TestJudgeConfig_ModeMismatch verifies that a flag with the wrong mode falls back to the
+// default and logs a warning.
+func TestJudgeConfig_ModeMismatch(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"messages": [{"content": "test", "role": "system"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIJudgeConfigDefault().WithEvaluationMetricKey("accuracy")
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), def, nil)
+
+	assert.Equal(t, "accuracy", cfg.EvaluationMetricKey(),
+		"mode mismatch must fall back to default")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
+}
+
+// TestJudgeConfig_ModeEmpty verifies that a judge flag with no mode is accepted for back-compat.
+func TestJudgeConfig_ModeEmpty(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"evaluationMetricKey": "toxicity",
+		"messages": [{"content": "test", "role": "system"}]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), nil)
+
+	assert.Equal(t, "toxicity", cfg.EvaluationMetricKey(),
+		"empty mode must be accepted for backward compatibility")
 }
