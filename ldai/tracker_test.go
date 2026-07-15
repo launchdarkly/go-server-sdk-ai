@@ -1065,4 +1065,32 @@ func TestTrackMetricsOf(t *testing.T) {
 		}
 		assert.Equal(t, 1, errorEvents, "expected exactly one error event")
 	})
+
+	t.Run("Success:false with nil error emits generation:error not generation:success", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(10*time.Millisecond), "")
+
+		got, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics { return AIMetrics{Success: false} },
+			func() (struct{}, error) { return struct{}{}, nil },
+		)
+
+		assert.NoError(t, err)
+		assert.Equal(t, struct{}{}, got)
+
+		for _, e := range events.events {
+			assert.NotEqual(t, "$ld:ai:generation:success", e.name, "must not emit success when Success is false")
+		}
+
+		errorEvents := 0
+		for _, e := range events.events {
+			if e.name == "$ld:ai:generation:error" {
+				errorEvents++
+			}
+		}
+		assert.Equal(t, 1, errorEvents, "expected exactly one error event when Success is false")
+	})
 }

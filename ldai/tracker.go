@@ -463,8 +463,14 @@ func TrackMetricsOf[T any](t *Tracker, extract func(T) AIMetrics, operation func
 
 	metrics := extract(result)
 
-	if e := t.TrackSuccess(); e != nil {
-		t.logWarning("error tracking success metric: %v", e)
+	if metrics.Success {
+		if e := t.TrackSuccess(); e != nil {
+			t.logWarning("error tracking success metric: %v", e)
+		}
+	} else {
+		if e := t.TrackError(); e != nil {
+			t.logWarning("error tracking error metric: %v", e)
+		}
 	}
 
 	if metrics.DurationMs != nil {
