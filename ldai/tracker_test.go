@@ -3,6 +3,7 @@ package ldai
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -778,4 +779,145 @@ func TestExplicitVersionZeroInResumptionToken(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(decoded, &payload))
 	assert.Equal(t, 0, payload.Version)
+}
+
+func ptrFloat64(v float64) *float64 { return &v }
+
+func TestTrackDurationOf(t *testing.T) {
+	t.Run("tracks measured duration and returns nil error", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(55*time.Millisecond), "")
+
+		err := tracker.TrackDurationOf(func() error { return nil })
+
+		assert.NoError(t, err)
+		require.Len(t, events.events, 1)
+		assert.Equal(t, "$ld:ai:duration:total", events.events[0].name)
+		assert.Equal(t, 55.0, events.events[0].metricValue)
+	})
+
+	t.Run("returns operation error and still tracks duration", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(10*time.Millisecond), "")
+
+		opErr := fmt.Errorf("boom")
+		err := tracker.TrackDurationOf(func() error { return opErr })
+
+		assert.Equal(t, opErr, err)
+		require.Len(t, events.events, 1)
+		assert.Equal(t, "$ld:ai:duration:total", events.events[0].name)
+	})
+}
+
+func TestTrackMetricsOf(t *testing.T) {
+	t.Run("completion tracker: tracks duration, success, and tokens", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(20*time.Millisecond), "")
+
+		type result struct{ val string }
+		tokens := TokenUsage{Total: 10, Input: 4, Output: 6}
+
+		got, err := TrackMetricsOf(tracker,
+			func(r result) AIMetrics {
+				return AIMetrics{Success: true, Tokens: &tokens}
+			},
+			func() (result, error) { return result{"ok"}, nil },
+		)
+
+		assert.NoError(t, err)
+		assert.Equal(t, result{"ok"}, got)
+
+		names := make([]string, len(events.events))
+		for i, e := range events.events {
+			names[i] = e.name
+		}
+		assert.Contains(t, names, "$ld:ai:generation:success")
+		assert.Contains(t, names, "$ld:ai:duration:total")
+		assert.Contains(t, names, "$ld:ai:tokens:total")
+
+		for _, e := range events.events {
+			if e.name == "$ld:ai:duration:total" {
+				assert.Equal(t, 20.0, e.metricValue)
+			}
+		}
+	})
+
+	t.Run("judge tracker: works without completion-only rejection", func(t *testing.T) {
+		events := newMockEvents()
+		judgeConfig := &AIJudgeConfig{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), judgeConfig, nil, "")
+
+		_, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics { return AIMetrics{} },
+			func() (struct{}, error) { return struct{}{}, nil },
+		)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("DurationMs override used instead of wall-clock", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(99*time.Millisecond), "")
+
+		_, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics {
+				return AIMetrics{DurationMs: ptrFloat64(100.0)}
+			},
+			func() (struct{}, error) { return struct{}{}, nil },
+		)
+
+		assert.NoError(t, err)
+		for _, e := range events.events {
+			if e.name == "$ld:ai:duration:total" {
+				assert.Equal(t, 100.0, e.metricValue, "runner-reported duration should be used")
+				return
+			}
+		}
+		t.Fatal("expected a duration event")
+	})
+
+	t.Run("error path: tracks error, no success or tokens", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(5*time.Millisecond), "")
+
+		opErr := fmt.Errorf("model failed")
+		tokens := TokenUsage{Total: 5}
+
+		_, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics {
+				return AIMetrics{Tokens: &tokens}
+			},
+			func() (struct{}, error) { return struct{}{}, opErr },
+		)
+
+		assert.Equal(t, opErr, err)
+
+		for _, e := range events.events {
+			assert.NotEqual(t, "$ld:ai:generation:success", e.name)
+			assert.NotEqual(t, "$ld:ai:tokens:total", e.name)
+		}
+
+		errorEvents := 0
+		for _, e := range events.events {
+			if e.name == "$ld:ai:generation:error" {
+				errorEvents++
+			}
+		}
+		assert.Equal(t, 1, errorEvents, "expected exactly one error event")
+	})
 }

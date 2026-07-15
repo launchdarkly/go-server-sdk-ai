@@ -84,6 +84,18 @@ type ProviderResponse struct {
 	Metrics Metrics
 }
 
+// AIMetrics is the mode-agnostic metrics summary returned by an operation
+// passed to TrackMetricsOf.
+type AIMetrics struct {
+	// Success indicates whether the operation succeeded.
+	Success bool
+	// Tokens is the optional token usage to record.
+	Tokens *TokenUsage
+	// DurationMs is an optional runner-reported duration override in milliseconds (AITRACK §1.1.13.2).
+	// When nil, TrackMetricsOf uses the measured wall-clock duration instead.
+	DurationMs *float64
+}
+
 // Feedback represents the feedback provided by a user for a model evaluation.
 type Feedback string
 
@@ -420,6 +432,59 @@ func (t *Tracker) TrackUsage(usage TokenUsage) error {
 	return t.TrackTokens(usage)
 }
 
+// TrackDurationOf measures the wall-clock duration of operation and tracks it
+// via TrackDuration. Valid for all tracker modes.
+func (t *Tracker) TrackDurationOf(operation func() error) error {
+	t.stopwatch.Start()
+	err := operation()
+	dur := t.stopwatch.Stop()
+	if trackErr := t.TrackDuration(dur); trackErr != nil {
+		t.logWarning("error tracking duration: %v", trackErr)
+	}
+	return err
+}
+
+// TrackMetricsOf runs operation, calls extract to get AIMetrics from the result, then
+// tracks duration (runner-reported DurationMs if set, otherwise wall-clock), success/error,
+// and tokens. Valid for completion, agent, and judge trackers.
+func TrackMetricsOf[T any](t *Tracker, extract func(T) AIMetrics, operation func() (T, error)) (T, error) {
+	t.stopwatch.Start()
+	result, err := operation()
+	measured := t.stopwatch.Stop()
+
+	if err != nil {
+		if e := t.TrackError(); e != nil {
+			t.logWarning("error tracking error metric: %v", e)
+		}
+		return result, err
+	}
+
+	metrics := extract(result)
+
+	if e := t.TrackSuccess(); e != nil {
+		t.logWarning("error tracking success metric: %v", e)
+	}
+
+	if metrics.DurationMs != nil {
+		dur := time.Duration(*metrics.DurationMs * float64(time.Millisecond))
+		if e := t.TrackDuration(dur); e != nil {
+			t.logWarning("error tracking duration (runner-reported): %v", e)
+		}
+	} else {
+		if e := t.TrackDuration(measured); e != nil {
+			t.logWarning("error tracking duration (measured): %v", e)
+		}
+	}
+
+	if metrics.Tokens != nil {
+		if e := t.TrackTokens(*metrics.Tokens); e != nil {
+			t.logWarning("error tracking tokens: %v", e)
+		}
+	}
+
+	return result, nil
+}
+
 func measureDurationOfTask[T any, A any](
 	stopwatch Stopwatch,
 	arg A,
@@ -457,6 +522,9 @@ func (t *Tracker) GetSummary() MetricSummary {
 //
 // Subsequent calls re-run the task but emit only metrics not already recorded
 // on this Tracker. Call CreateTracker on the AI Config to start a new run.
+//
+// Deprecated: Use TrackMetricsOf, which is mode-agnostic. TrackRequest is a
+// completion-only convenience and returns an error for agent/judge trackers.
 func (t *Tracker) TrackRequest(task func(c *Config) (ProviderResponse, error)) (ProviderResponse, error) {
 	cfg, ok := t.config.(*Config)
 	if !ok {
