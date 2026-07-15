@@ -29,7 +29,6 @@ func (c *AICompletionConfig) Messages() []datamodel.Message {
 }
 
 // JudgeConfiguration returns the judge configuration attached to this config, if any.
-// Returns a defensive copy to prevent mutations.
 func (c *AICompletionConfig) JudgeConfiguration() *datamodel.JudgeConfiguration {
 	return c.judgeConfiguration.Clone()
 }

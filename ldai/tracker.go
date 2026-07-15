@@ -266,9 +266,7 @@ func (t *Tracker) logWarning(format string, args ...interface{}) {
 	t.logger.Warnf(prefix+format, args...)
 }
 
-// ResumptionToken returns a URL-safe Base64-encoded token that can be used to reconstruct a tracker
-// in a different process (e.g., for deferred feedback). The token contains the runId, configKey,
-// variationKey, version, and graphKey when present. It does not contain modelName or providerName.
+// ResumptionToken returns a URL-safe Base64-encoded token for reconstructing this Tracker.
 func (t *Tracker) ResumptionToken() string {
 	payload := resumptionPayload{
 		RunID:        t.runID,
@@ -281,11 +279,8 @@ func (t *Tracker) ResumptionToken() string {
 	return base64.RawURLEncoding.EncodeToString(jsonBytes)
 }
 
-// TrackerFromResumptionToken reconstructs a Tracker from a resumption token and the given context.
-// This is used for cross-process scenarios (e.g., deferred feedback) where the original tracker
-// is no longer available but its runId must be reused. The token is obtained from Tracker.ResumptionToken().
-// The reconstructed tracker will have empty modelName and providerName since these are not included
-// in the token.
+// TrackerFromResumptionToken reconstructs a Tracker from a token produced by
+// Tracker.ResumptionToken, reusing the original runId.
 func TrackerFromResumptionToken(token string, sdk ServerSDK, context ldcontext.Context) (*Tracker, error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
