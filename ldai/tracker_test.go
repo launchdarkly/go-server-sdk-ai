@@ -764,6 +764,151 @@ func TestTrackerFromResumptionToken_GraphKey(t *testing.T) {
 	assert.Equal(t, "my-graph", sdk.events[0].data.GetByKey("graphKey").StringValue())
 }
 
+func TestTracker_TrackToolCall(t *testing.T) {
+	t.Run("emits tool_call event with toolKey in data and metric value 1", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCall("search"))
+
+		require.Len(t, events.events, 1)
+		evt := events.events[0]
+		assert.Equal(t, "$ld:ai:tool_call", evt.name)
+		assert.Equal(t, 1.0, evt.metricValue)
+		assert.Equal(t, "search", evt.data.GetByKey("toolKey").StringValue())
+	})
+
+	t.Run("may be called multiple times", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCall("search"))
+		assert.NoError(t, tracker.TrackToolCall("calculator"))
+
+		assert.Len(t, events.events, 2)
+		assert.Equal(t, "$ld:ai:tool_call", events.events[0].name)
+		assert.Equal(t, "$ld:ai:tool_call", events.events[1].name)
+		assert.Equal(t, "search", events.events[0].data.GetByKey("toolKey").StringValue())
+		assert.Equal(t, "calculator", events.events[1].data.GetByKey("toolKey").StringValue())
+	})
+
+	t.Run("base trackData keys are preserved in tool call event", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCall("search"))
+
+		runId := extractRunId(t, events)
+		expectedBase := makeTrackData("key", "variationKey", 1, config, runId, "")
+		for _, key := range expectedBase.Keys(nil) {
+			assert.Equal(t, expectedBase.GetByKey(key), events.events[0].data.GetByKey(key),
+				"track data key %q must be preserved", key)
+		}
+	})
+}
+
+func TestTracker_TrackToolCalls(t *testing.T) {
+	t.Run("emits one event per tool key", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		keys := []string{"search", "calculator", "weather"}
+		assert.NoError(t, tracker.TrackToolCalls(keys))
+
+		require.Len(t, events.events, 3)
+		for i, key := range keys {
+			assert.Equal(t, "$ld:ai:tool_call", events.events[i].name)
+			assert.Equal(t, key, events.events[i].data.GetByKey("toolKey").StringValue())
+		}
+	})
+
+	t.Run("empty slice emits no events", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCalls([]string{}))
+		assert.Empty(t, events.events)
+	})
+}
+
+func TestTracker_GetSummary_ToolCalls(t *testing.T) {
+	t.Run("empty when no tool calls tracked", func(t *testing.T) {
+		events := newMockEvents()
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil, "")
+
+		assert.Empty(t, tracker.GetSummary().ToolCalls)
+	})
+
+	t.Run("reflects keys passed to TrackToolCall in order", func(t *testing.T) {
+		events := newMockEvents()
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil, "")
+
+		_ = tracker.TrackToolCall("search")
+		_ = tracker.TrackToolCall("calculator")
+		_ = tracker.TrackToolCall("search")
+
+		assert.Equal(t, []string{"search", "calculator", "search"}, tracker.GetSummary().ToolCalls)
+	})
+
+	t.Run("summary ToolCalls is a defensive copy", func(t *testing.T) {
+		events := newMockEvents()
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil, "")
+
+		_ = tracker.TrackToolCall("search")
+		summary := tracker.GetSummary()
+		summary.ToolCalls[0] = "mutated"
+
+		assert.Equal(t, []string{"search"}, tracker.GetSummary().ToolCalls)
+	})
+}
+
+func TestTracker_GetSummary_ResumptionToken(t *testing.T) {
+	events := newMockEvents()
+	config := &Config{}
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+	summary := tracker.GetSummary()
+
+	assert.NotEmpty(t, summary.ResumptionToken)
+	assert.Equal(t, tracker.ResumptionToken(), summary.ResumptionToken)
+}
+
+func TestTracker_GetTrackData(t *testing.T) {
+	t.Run("all fields populated from constructor args", func(t *testing.T) {
+		events := newMockEvents()
+		config := NewConfig().WithModelName("gpt-4").WithProviderName("openai").Build()
+		tracker := newTracker(events, "fixed-run-id", "my-config", "var-1", 3, ldcontext.New("key"), &config, nil, "my-graph")
+
+		td := tracker.GetTrackData()
+
+		assert.Equal(t, "fixed-run-id", td.RunID)
+		assert.Equal(t, "my-config", td.ConfigKey)
+		assert.Equal(t, 3, td.Version)
+		assert.Equal(t, "var-1", td.VariationKey)
+		assert.Equal(t, "gpt-4", td.ModelName)
+		assert.Equal(t, "openai", td.ProviderName)
+		assert.Equal(t, "my-graph", td.GraphKey)
+		assert.Equal(t, SDKName, td.AISdkName)
+		assert.Equal(t, Version, td.AISdkVersion)
+	})
+
+	t.Run("empty optional fields when not set", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "", 1, ldcontext.New("key"), config, nil, "")
+
+		td := tracker.GetTrackData()
+
+		assert.Empty(t, td.VariationKey)
+		assert.Empty(t, td.GraphKey)
+	})
+}
+
 func TestExplicitVersionZeroInResumptionToken(t *testing.T) {
 	// A tracker with version 0 must encode and decode 0, not 1.
 	events := newMockEvents()
