@@ -405,8 +405,8 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 	return cfg
 }
 
-// evaluateJudgeConfig is the internal helper shared by JudgeConfig (Task 03) and future
-// JudgeConfigTemplate / CreateJudge callers (Tasks 04/05) that need to build a judge config
+// evaluateJudgeConfig is the internal helper shared by JudgeConfig and future
+// judge-template / judge-creation callers that need to build a judge config
 // without re-emitting the usage event.
 func (c *Client) evaluateJudgeConfig(
 	key string,
@@ -433,8 +433,8 @@ func (c *Client) evaluateJudgeConfig(
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
 
-	// Mode-mismatch validation: accept "judge" or "" (back-compat); fall back on mismatch.
-	if parsed.Meta.Mode != "judge" && parsed.Meta.Mode != "" {
+	// Mode-mismatch validation: a missing mode defaults to "completion" per spec, which mismatches "judge".
+	if parsed.Meta.Mode != "judge" {
 		c.logConfigWarning(key, "expected mode %q but got %q; using default", "judge", parsed.Meta.Mode)
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
@@ -520,9 +520,9 @@ func (c *Client) returnAgentDefault(
 	return cfg
 }
 
-// evaluateAgentConfig is the internal helper shared by AgentConfig (Task 03) and future
-// graph node construction (Task 06) that needs to build an agent config without re-emitting
-// the usage event. graphKey is set by graph-node construction; empty for standalone calls.
+// evaluateAgentConfig is the internal helper shared by AgentConfig and future
+// agent-graph node construction that needs to build an agent config without
+// re-emitting the usage event. graphKey is set by graph-node construction; empty for standalone calls.
 func (c *Client) evaluateAgentConfig(
 	key string,
 	context ldcontext.Context,
@@ -535,8 +535,8 @@ func (c *Client) evaluateAgentConfig(
 		return c.returnAgentDefault(key, context, defaultValue, graphKey)
 	}
 
-	// Mode-mismatch validation: accept "agent" or "" (back-compat); fall back on mismatch.
-	if parsed.Meta.Mode != "agent" && parsed.Meta.Mode != "" {
+	// Mode-mismatch validation: a missing mode defaults to "completion" per spec, which mismatches "agent".
+	if parsed.Meta.Mode != "agent" {
 		c.logConfigWarning(key, "expected mode %q but got %q; using default", "agent", parsed.Meta.Mode)
 		return c.returnAgentDefault(key, context, defaultValue, graphKey)
 	}

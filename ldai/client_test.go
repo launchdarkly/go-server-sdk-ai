@@ -1036,7 +1036,7 @@ func TestCreateTracker_JudgeConfigHasFactory(t *testing.T) {
 // with the right field values from the wire payload.
 func TestJudgeConfig_TypedReturn(t *testing.T) {
 	raw := []byte(`{
-		"_ldMeta": {"variationKey": "v-judge", "enabled": true},
+		"_ldMeta": {"variationKey": "v-judge", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"model": {"name": "judge-model"},
 		"provider": {"name": "judge-provider"},
@@ -1083,7 +1083,7 @@ func TestJudgeConfig_DefaultPath(t *testing.T) {
 // emits the expected model/provider/configKey/version fields.
 func TestJudgeConfig_TrackerEmitsCorrectTrackData(t *testing.T) {
 	raw := []byte(`{
-		"_ldMeta": {"variationKey": "v-j", "enabled": true, "version": 3},
+		"_ldMeta": {"variationKey": "v-j", "enabled": true, "version": 3, "mode": "judge"},
 		"evaluationMetricKey": "relevance",
 		"model": {"name": "judge-model"},
 		"provider": {"name": "judge-provider"},
@@ -1154,7 +1154,7 @@ func TestJudgeConfig_EvaluationMetricKeyFallback(t *testing.T) {
 
 	t.Run("only plural entry → returns first non-empty plural", func(t *testing.T) {
 		raw := []byte(`{
-			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 			"evaluationMetricKeys": ["$ld:ai:judge:x"],
 			"messages": [{"content": "test", "role": "system"}]
 		}`)
@@ -1164,7 +1164,7 @@ func TestJudgeConfig_EvaluationMetricKeyFallback(t *testing.T) {
 
 	t.Run("both present → singular wins", func(t *testing.T) {
 		raw := []byte(`{
-			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 			"evaluationMetricKey": "singular",
 			"evaluationMetricKeys": ["plural"],
 			"messages": [{"content": "test", "role": "system"}]
@@ -1175,7 +1175,7 @@ func TestJudgeConfig_EvaluationMetricKeyFallback(t *testing.T) {
 
 	t.Run("whitespace singular + valid plural → returns first non-empty plural", func(t *testing.T) {
 		raw := []byte(`{
-			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 			"evaluationMetricKey": "   ",
 			"evaluationMetricKeys": ["", "  ", "fallback"],
 			"messages": [{"content": "test", "role": "system"}]
@@ -1186,7 +1186,7 @@ func TestJudgeConfig_EvaluationMetricKeyFallback(t *testing.T) {
 
 	t.Run("neither present → empty key", func(t *testing.T) {
 		raw := []byte(`{
-			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 			"messages": [{"content": "test", "role": "system"}]
 		}`)
 		cfg := makeClient(t, raw).JudgeConfig("k", ctx, def, nil)
@@ -1516,19 +1516,22 @@ func TestAgentConfig_ModeMismatch(t *testing.T) {
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
 }
 
-// TestAgentConfig_ModeEmpty verifies that a flag with no mode field is accepted for back-compat.
-func TestAgentConfig_ModeEmpty(t *testing.T) {
+// TestAgentConfig_ModeEmptyFallsBack verifies that a flag with no mode field falls back to the
+// default and logs a warning, because a missing mode is treated as "completion" per spec.
+func TestAgentConfig_ModeEmptyFallsBack(t *testing.T) {
 	raw := []byte(`{
 		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"instructions": "Back-compat instructions."
+		"instructions": "Should not be used."
 	}`)
-	client, err := NewClient(newMockSDK(raw, nil))
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
 	require.NoError(t, err)
 
 	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault(), nil)
 
-	assert.Equal(t, "Back-compat instructions.", cfg.Instructions(),
-		"empty mode must be accepted for backward compatibility")
+	assert.Equal(t, "", cfg.Instructions(),
+		"empty mode must fall back to default")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
 }
 
 // ---- AgentConfigs batch tests ----
@@ -1635,18 +1638,21 @@ func TestJudgeConfig_ModeMismatch(t *testing.T) {
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
 }
 
-// TestJudgeConfig_ModeEmpty verifies that a judge flag with no mode is accepted for back-compat.
-func TestJudgeConfig_ModeEmpty(t *testing.T) {
+// TestJudgeConfig_ModeEmptyFallsBack verifies that a judge flag with no mode falls back to the
+// default and logs a warning, because a missing mode is treated as "completion" per spec.
+func TestJudgeConfig_ModeEmptyFallsBack(t *testing.T) {
 	raw := []byte(`{
 		"_ldMeta": {"variationKey": "1", "enabled": true},
 		"evaluationMetricKey": "toxicity",
 		"messages": [{"content": "test", "role": "system"}]
 	}`)
-	client, err := NewClient(newMockSDK(raw, nil))
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
 	require.NoError(t, err)
 
 	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), nil)
 
-	assert.Equal(t, "toxicity", cfg.EvaluationMetricKey(),
-		"empty mode must be accepted for backward compatibility")
+	assert.Equal(t, "", cfg.EvaluationMetricKey(),
+		"empty mode must fall back to default")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
 }
