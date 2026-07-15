@@ -774,7 +774,6 @@ func TestParseEvaluationMetricKeyPriority(t *testing.T) {
 }
 
 func TestJudgeConfigurationImmutable(t *testing.T) {
-	// Test that mutations to JudgeConfiguration don't affect the Config
 	judgeConfig := &datamodel.JudgeConfiguration{
 		Judges: []datamodel.Judge{
 			{Key: "judge1", SamplingRate: 0.5},
@@ -782,10 +781,11 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 		},
 	}
 
-	builder := NewConfig().
-		Enable().
-		WithJudgeConfiguration(judgeConfig)
-	cfg := builder.Build()
+	client, err := NewClient(newMockSDK(nil, fmt.Errorf("offline")))
+	require.NoError(t, err)
+
+	def := NewAICompletionConfigDefault().WithEnabled(true).WithJudgeConfiguration(judgeConfig)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 
 	// Mutate the original
 	judgeConfig.Judges[0].Key = "mutated"
@@ -795,10 +795,10 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 	retrieved := cfg.JudgeConfiguration()
 	require.NotNil(t, retrieved)
 	require.Len(t, retrieved.Judges, 2)
-	assert.Equal(t, "judge1", retrieved.Judges[0].Key) // Should still be original value
+	assert.Equal(t, "judge1", retrieved.Judges[0].Key)
 	assert.Equal(t, "judge2", retrieved.Judges[1].Key)
 
-	// Mutate the retrieved config
+	// Mutate the retrieved value
 	retrieved.Judges[0].Key = "mutated_again"
 	retrieved.Judges = append(retrieved.Judges, datamodel.Judge{Key: "judge4", SamplingRate: 0.4})
 
@@ -806,7 +806,7 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 	retrieved2 := cfg.JudgeConfiguration()
 	require.NotNil(t, retrieved2)
 	require.Len(t, retrieved2.Judges, 2)
-	assert.Equal(t, "judge1", retrieved2.Judges[0].Key) // Should still be original value
+	assert.Equal(t, "judge1", retrieved2.Judges[0].Key)
 	assert.Equal(t, "judge2", retrieved2.Judges[1].Key)
 }
 
@@ -829,11 +829,6 @@ func TestConfig_WithoutReservedVarsWipesJudgePlaceholders(t *testing.T) {
 	msgs := cfg.Messages()
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "Input: \nOutput: ", msgs[0].Content, "Config without reserved vars renders placeholders as empty")
-}
-
-func TestCreateTracker_ManuallyBuiltConfig_ReturnsNil(t *testing.T) {
-	cfg := NewConfig().Enable().WithMessage("hello", datamodel.User).Build()
-	assert.Nil(t, cfg.CreateTracker(), "manually built config should not have a tracker factory")
 }
 
 func TestCreateTracker_DisabledConfig_ReturnsTracker(t *testing.T) {

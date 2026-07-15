@@ -565,44 +565,13 @@ func TestAIJudgeConfigDefault_WithModelParam_ImmutableCopy(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Backward compatibility: deprecated Config alias and ConfigBuilder
+// Backward compatibility: deprecated Config alias
 // ---------------------------------------------------------------------------
 
 func TestConfig_TypeAliasIsAICompletionConfig(t *testing.T) {
 	// Config must be an alias for AICompletionConfig — the same type.
 	var _ AICompletionConfig = Config{}
 	var _ Config = AICompletionConfig{}
-}
-
-func TestConfigBuilder_BackwardCompatBuild(t *testing.T) {
-	cfg := NewConfig().
-		Enable().
-		WithModelName("my-model").
-		WithProviderName("my-provider").
-		WithMessage("hi", datamodel.User).
-		WithModelParam("temperature", ldvalue.Float64(0.5)).
-		WithCustomModelParam("custom_key", ldvalue.String("val")).
-		Build()
-
-	assert.True(t, cfg.Enabled())
-	assert.Equal(t, "my-model", cfg.ModelName())
-	assert.Equal(t, "my-provider", cfg.ProviderName())
-
-	p, ok := cfg.ModelParam("temperature")
-	require.True(t, ok)
-	assert.Equal(t, ldvalue.Float64(0.5), p)
-
-	cp, ok := cfg.CustomModelParam("custom_key")
-	require.True(t, ok)
-	assert.Equal(t, ldvalue.String("val"), cp)
-
-	require.Len(t, cfg.Messages(), 1)
-	assert.Equal(t, "hi", cfg.Messages()[0].Content)
-}
-
-func TestVersionDefaultsToOne_ForManuallyBuiltConfig(t *testing.T) {
-	cfg := NewConfig().Build()
-	assert.Equal(t, 1, cfg.Version())
 }
 
 func TestVersionFromWire(t *testing.T) {
