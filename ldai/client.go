@@ -6,7 +6,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 
@@ -21,8 +20,8 @@ import (
 const ldContextVariable = "ldctx"
 
 // JudgePlaceholderMessageHistory and JudgePlaceholderResponseToEvaluate are the literal placeholder
-// strings shared between JudgeConfig (pass 1) and Judge.buildMessages (pass 2). Both must use the
-// same values or substitution silently fails.
+// strings injected during judge config evaluation (pass 1) and consumed by Judge.buildMessages (pass 2).
+// Both passes must use the same values or substitution silently fails.
 const (
 	JudgePlaceholderMessageHistory     = "{{message_history}}"
 	JudgePlaceholderResponseToEvaluate = "{{response_to_evaluate}}"
@@ -55,7 +54,6 @@ type Client struct {
 const (
 	sdkInfoEvent          = "$ld:ai:sdk:info"
 	usageCompletionConfig = "$ld:ai:usage:completion-config"
-	usageJudgeConfig      = "$ld:ai:usage:judge-config"
 )
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
@@ -178,7 +176,7 @@ func (c *Client) evaluateShared(
 }
 
 // evaluateConfig fetches and interpolates an AI Config without emitting any metric.
-// Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
+// Callers are meant to emit their own metric before calling this.
 func (c *Client) evaluateConfig(
 	key string,
 	context ldcontext.Context,
@@ -344,94 +342,4 @@ func defaultVersion(v *int) int {
 		return 1
 	}
 	return *v
-}
-
-// returnJudgeDefault builds an AIJudgeConfig from the provided default, wires a tracker factory,
-// and returns it. Used for all error-path returns in JudgeConfig.
-func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def AIJudgeConfigDefault) AIJudgeConfig {
-	cfg := AIJudgeConfig{
-		aiConfigBase: aiConfigBase{
-			key:     key,
-			enabled: def.enabled,
-			version: defaultVersion(nil),
-			model: ModelConfig{
-				Name:       def.modelName,
-				Parameters: maps.Clone(def.modelParams),
-				Custom:     maps.Clone(def.modelCustom),
-			},
-			provider: ProviderConfig{Name: def.providerName},
-		},
-		messages:            slices.Clone(def.messages),
-		evaluationMetricKey: def.evaluationMetricKey,
-	}
-	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
-	}
-	return cfg
-}
-
-// JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved
-// variables message_history and response_to_evaluate are preserved as literal placeholders for
-// substitution by Judge.buildMessages during evaluation.
-//
-// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIJudgeConfig to obtain a Tracker.
-func (c *Client) JudgeConfig(
-	key string,
-	context ldcontext.Context,
-	defaultValue AIJudgeConfigDefault,
-	variables map[string]interface{},
-) AIJudgeConfig {
-	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
-	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
-
-	// Extend variables with reserved judge placeholders.
-	extendedVariables := make(map[string]interface{})
-	for k, v := range variables {
-		if k == "message_history" || k == "response_to_evaluate" {
-			c.logger.Warnf("AI Config '%s': variable '%s' is reserved by judge and will be ignored", key, k)
-			continue
-		}
-		extendedVariables[k] = v
-	}
-	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
-	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
-
-	parsed, interpolated, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables)
-	if !ok {
-		return c.returnJudgeDefault(key, context, defaultValue)
-	}
-
-	// Prefer the singular evaluationMetricKey; fall back to the first non-empty deprecated
-	// evaluationMetricKeys entry for backward compatibility (matches JS/.NET behavior).
-	metricKey := strings.TrimSpace(parsed.EvaluationMetricKey)
-	if metricKey == "" {
-		for _, k := range parsed.EvaluationMetricKeys {
-			if trimmed := strings.TrimSpace(k); trimmed != "" {
-				metricKey = trimmed
-				break
-			}
-		}
-	}
-
-	cfg := AIJudgeConfig{
-		aiConfigBase: aiConfigBase{
-			key:          key,
-			enabled:      parsed.Meta.Enabled,
-			variationKey: parsed.Meta.VariationKey,
-			version:      defaultVersion(parsed.Meta.Version),
-			model: ModelConfig{
-				Name:       parsed.Model.Name,
-				Parameters: maps.Clone(parsed.Model.Parameters),
-				Custom:     maps.Clone(parsed.Model.Custom),
-			},
-			provider: ProviderConfig{Name: parsed.Provider.Name},
-			tools:    tools,
-		},
-		messages:            interpolated,
-		evaluationMetricKey: metricKey,
-	}
-	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
-	}
-	return cfg
 }
