@@ -21,8 +21,8 @@ import (
 const ldContextVariable = "ldctx"
 
 // JudgePlaceholderMessageHistory and JudgePlaceholderResponseToEvaluate are the literal placeholder
-// strings shared between JudgeConfig (pass 1) and Judge.buildMessages (pass 2). Both must use the
-// same values or substitution silently fails.
+// strings injected during judge config evaluation (pass 1) and consumed by Judge.buildMessages (pass 2).
+// Both passes must use the same values or substitution silently fails.
 const (
 	JudgePlaceholderMessageHistory     = "{{message_history}}"
 	JudgePlaceholderResponseToEvaluate = "{{response_to_evaluate}}"
@@ -408,9 +408,8 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 	return cfg
 }
 
-// evaluateJudgeConfig is the internal helper shared by JudgeConfig and future
-// judge-template / judge-creation callers that need to build a judge config
-// without re-emitting the usage event.
+// evaluateJudgeConfig fetches, validates, and interpolates a judge config without emitting
+// any metric. JudgeConfig emits its own metric before calling this.
 func (c *Client) evaluateJudgeConfig(
 	key string,
 	context ldcontext.Context,
@@ -523,9 +522,9 @@ func (c *Client) returnAgentDefault(
 	return cfg
 }
 
-// evaluateAgentConfig is the internal helper shared by AgentConfig and future
-// agent-graph node construction that needs to build an agent config without
-// re-emitting the usage event. graphKey is set by graph-node construction; empty for standalone calls.
+// evaluateAgentConfig fetches, validates, and interpolates an agent config without emitting
+// any metric. AgentConfig emits its own metric before calling this.
+// graphKey is non-empty when called from a graph-node context; empty for standalone calls.
 func (c *Client) evaluateAgentConfig(
 	key string,
 	context ldcontext.Context,

@@ -439,44 +439,6 @@ func TestCompletionConfigMethodTracking(t *testing.T) {
 	assert.ElementsMatch(t, expectedEvents, mockSDK.events)
 }
 
-// TestJudgeConfigMethodTracking verifies that JudgeConfig emits only the judge metric,
-// not the completion-config metric, so judge evaluations are not double-counted on the dashboard.
-func TestJudgeConfigMethodTracking(t *testing.T) {
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
-		"evaluationMetricKey": "toxicity",
-		"messages": [{"content": "test", "role": "system"}]
-	}`)
-	mockSDK := newMockSDK(json, nil)
-	client, err := NewClient(mockSDK)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// Clear the SDK info event from construction.
-	mockSDK.events = nil
-
-	defaultConfig := NewAIJudgeConfigDefault()
-	context := ldcontext.New("user-key")
-	configKey := "judge-config-key"
-
-	config := client.JudgeConfig(configKey, context, defaultConfig, nil)
-
-	require.NotNil(t, config.CreateTracker())
-
-	// Only the judge metric should be emitted; evaluateConfig does not emit any metric.
-	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
-	expectedEvents := []mockEvent{
-		{
-			eventName:   "$ld:ai:usage:judge-config",
-			context:     context,
-			metricValue: 1,
-			data:        expectedData,
-		},
-	}
-	assert.ElementsMatch(t, expectedEvents, mockSDK.events,
-		"JudgeConfig must not emit $ld:ai:usage:completion-config to avoid double-counting")
-}
-
 func TestCanSetModelParameters(t *testing.T) {
 	client, err := NewClient(newMockSDK(nil, nil))
 	require.NoError(t, err)
@@ -848,33 +810,6 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 	assert.Equal(t, "judge2", retrieved2.Judges[1].Key)
 }
 
-// TestJudgeConfig_PreservesReservedPlaceholders verifies that JudgeConfig injects reserved variables
-// so that {{message_history}} and {{response_to_evaluate}} are preserved for the second interpolation
-// pass during Judge.Evaluate(). Without this, Config's first Mustache pass would render them as empty.
-func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
-		"evaluationMetricKey": "toxicity",
-		"messages": [
-			{"content": "You are a judge.", "role": "system"},
-			{"content": "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", "role": "user"}
-		]
-	}`)
-
-	client, err := NewClient(newMockSDK(json, nil))
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), nil)
-
-	msgs := cfg.Messages()
-	require.Len(t, msgs, 2)
-	assert.Equal(t, "You are a judge.", msgs[0].Content)
-	assert.Contains(t, msgs[1].Content, "{{message_history}}", "JudgeConfig must preserve placeholder for second interpolation")
-	assert.Contains(t, msgs[1].Content, "{{response_to_evaluate}}", "JudgeConfig must preserve placeholder for second interpolation")
-	assert.Equal(t, "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", msgs[1].Content)
-}
-
 // TestConfig_WithoutReservedVarsWipesJudgePlaceholders documents that Config (without reserved vars)
 // renders {{message_history}} and {{response_to_evaluate}} as empty when used for judge templates.
 func TestConfig_WithoutReservedVarsWipesJudgePlaceholders(t *testing.T) {
@@ -1192,6 +1127,65 @@ func TestJudgeConfig_EvaluationMetricKeyFallback(t *testing.T) {
 		cfg := makeClient(t, raw).JudgeConfig("k", ctx, def, nil)
 		assert.Equal(t, "", cfg.EvaluationMetricKey())
 	})
+}
+
+func TestJudgeConfigMethodTracking(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"evaluationMetricKey": "toxicity",
+		"messages": [{"content": "test", "role": "system"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	context := ldcontext.New("user-key")
+	configKey := "judge-config-key"
+	config := client.JudgeConfig(configKey, context, NewAIJudgeConfigDefault(), nil)
+	require.NotNil(t, config.CreateTracker())
+
+	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
+	assert.ElementsMatch(t, []mockEvent{
+		{
+			eventName:   "$ld:ai:usage:judge-config",
+			context:     context,
+			metricValue: 1,
+			data:        expectedData,
+		},
+	}, mockSDK.events)
+}
+
+func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"evaluationMetricKey": "toxicity",
+		"messages": [
+			{"content": "You are a judge.", "role": "system"},
+			{"content": "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", "role": "user"}
+		]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault(), nil)
+
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "You are a judge.", msgs[0].Content)
+	assert.Equal(t, "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", msgs[1].Content)
+}
+
+func TestCompletionConfig_DefaultPathPreservesTools(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAICompletionConfigDefault().WithTool(datamodel.Tool{Name: "search", Description: "Search the web"})
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
+
+	require.Len(t, cfg.Tools(), 1)
+	assert.Equal(t, "search", cfg.Tools()["search"].Name())
 }
 
 func TestClient_CreateTracker_RoundTrip(t *testing.T) {
