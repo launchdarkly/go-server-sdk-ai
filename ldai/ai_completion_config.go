@@ -89,9 +89,6 @@ func (c *AICompletionConfig) CustomModelParam(key string) (ldvalue.Value, bool) 
 //
 // Deprecated: The config type itself indicates the mode.
 func (c *AICompletionConfig) Mode() string {
-	if c.raw.Mode != "" {
-		return c.raw.Mode
-	}
 	return c.raw.Meta.Mode
 }
 
