@@ -1656,3 +1656,87 @@ func TestJudgeConfig_ModeEmptyFallsBack(t *testing.T) {
 		"empty mode must fall back to default")
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
 }
+
+// ---- Message interpolation error tests ----
+
+// TestAgentConfig_BadMessagesGoodInstructions verifies that a served agent flag with a malformed
+// messages entry but a valid instructions template returns the served config — not the default.
+// Agent configs use instructions, not messages, so messages interpolation must not be attempted.
+func TestAgentConfig_BadMessagesGoodInstructions(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "var-1", "enabled": true, "mode": "agent"},
+		"model": {"name": "gpt-4o", "provider": {"name": "openai"}},
+		"messages": [{"content": "{{ bad }]}", "role": "user"}],
+		"instructions": "Hello, {{name}}!"
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	def := NewAIAgentConfigDefault().WithInstructions("Default instructions.")
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), def,
+		map[string]interface{}{"name": "world"})
+
+	assert.True(t, cfg.Enabled(), "served config must be enabled")
+	assert.Equal(t, "Hello, world!", cfg.Instructions(),
+		"instructions must be interpolated from the served flag, not the default")
+	assert.Equal(t, "gpt-4o", cfg.ModelName(),
+		"model must come from the served flag, not the default")
+}
+
+// TestAgentConfig_BadInstructionsFallsBack verifies that a malformed instructions template still
+// causes evaluateAgentConfig to fall back to the default.
+func TestAgentConfig_BadInstructionsFallsBack(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "var-1", "enabled": true, "mode": "agent"},
+		"instructions": "{{ bad }]}"
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIAgentConfigDefault().WithInstructions("Default instructions.")
+	cfg := client.AgentConfig("agent-key", ldcontext.New("user"), def, nil)
+
+	assert.Equal(t, "Default instructions.", cfg.Instructions(),
+		"malformed instructions must fall back to default")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "malformed instructions template")
+}
+
+// TestCompletionConfig_BadMessagesFallsBack verifies that a completion flag with a malformed
+// message template still falls back to the default (regression guard — behavior unchanged).
+func TestCompletionConfig_BadMessagesFallsBack(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "var-1", "enabled": true},
+		"messages": [{"content": "{{ bad }]}", "role": "user"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAICompletionConfigDefault().WithMessage("Default message.", datamodel.User)
+	cfg := client.CompletionConfig("completion-key", ldcontext.New("user"), def, nil)
+
+	assert.Equal(t, def.AsLdValue(), cfg.AsLdValue(),
+		"malformed completion message must fall back to default")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "malformed message at index")
+}
+
+// TestJudgeConfig_BadMessagesFallsBack verifies that a judge flag with a malformed message
+// template still falls back to the default (regression guard — behavior unchanged).
+func TestJudgeConfig_BadMessagesFallsBack(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "var-1", "enabled": true, "mode": "judge"},
+		"evaluationMetricKey": "accuracy",
+		"messages": [{"content": "{{ bad }]}", "role": "system"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIJudgeConfigDefault().WithEvaluationMetricKey("default-metric")
+	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), def, nil)
+
+	assert.Equal(t, "default-metric", cfg.EvaluationMetricKey(),
+		"malformed judge message must fall back to default")
+	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "malformed message at index")
+}

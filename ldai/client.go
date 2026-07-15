@@ -158,14 +158,14 @@ func (c *Client) returnDefault(
 	return cfg
 }
 
-// evaluateShared fetches, validates, unmarshals, and interpolates a config. On any failure it
-// returns ok=false; the caller is responsible for returning its own typed default. On success it
-// returns the parsed wire config, the interpolated messages, and the resolved tools.
+// evaluateShared fetches, validates, and unmarshals a config, optionally interpolating messages.
+// On any failure it returns ok=false; the caller is responsible for returning its typed default.
 func (c *Client) evaluateShared(
 	key string,
 	context ldcontext.Context,
 	defaultLdValue ldvalue.Value,
 	variables map[string]interface{},
+	interpolateMessages bool,
 ) (
 	parsed datamodel.Config,
 	interpolated []datamodel.Message,
@@ -198,14 +198,17 @@ func (c *Client) evaluateShared(
 		mergedVariables[k] = v
 	}
 
-	msgs := make([]datamodel.Message, 0, len(parsed.Messages))
-	for i, msg := range parsed.Messages {
-		content, err := interpolateTemplate(msg.Content, mergedVariables)
-		if err != nil {
-			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
-			return datamodel.Config{}, nil, nil, false
+	var msgs []datamodel.Message
+	if interpolateMessages {
+		msgs = make([]datamodel.Message, 0, len(parsed.Messages))
+		for i, msg := range parsed.Messages {
+			content, err := interpolateTemplate(msg.Content, mergedVariables)
+			if err != nil {
+				c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
+				return datamodel.Config{}, nil, nil, false
+			}
+			msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 		}
-		msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
 	return parsed, msgs, c.resolveTools(key, result), true
@@ -219,7 +222,7 @@ func (c *Client) evaluateConfig(
 	defaultValue AICompletionConfigDefault,
 	variables map[string]interface{},
 ) AICompletionConfig {
-	parsed, interpolatedMessages, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
+	parsed, interpolatedMessages, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables, true)
 	if !ok {
 		return c.returnDefault(key, context, defaultValue)
 	}
@@ -428,7 +431,7 @@ func (c *Client) evaluateJudgeConfig(
 	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
 	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
 
-	parsed, interpolated, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables)
+	parsed, interpolated, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables, true)
 	if !ok {
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
@@ -530,7 +533,7 @@ func (c *Client) evaluateAgentConfig(
 	variables map[string]interface{},
 	graphKey string,
 ) AIAgentConfig {
-	parsed, _, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
+	parsed, _, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables, false)
 	if !ok {
 		return c.returnAgentDefault(key, context, defaultValue, graphKey)
 	}
