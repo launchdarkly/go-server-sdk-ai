@@ -55,15 +55,14 @@ func TestDatamodelRoundTrip_ToolsMapPreserved(t *testing.T) {
 
 func TestDatamodelRoundTrip_InstructionsField(t *testing.T) {
 	raw := []byte(`{
-		"_ldMeta": {"variationKey": "v1", "enabled": true},
-		"mode": "agent",
+		"_ldMeta": {"variationKey": "v1", "enabled": true, "mode": "agent"},
 		"instructions": "You are a helpful assistant."
 	}`)
 
 	var cfg datamodel.Config
 	require.NoError(t, json.Unmarshal(raw, &cfg))
 
-	assert.Equal(t, "agent", cfg.Mode)
+	assert.Equal(t, "agent", cfg.Meta.Mode)
 	assert.Equal(t, "You are a helpful assistant.", cfg.Instructions)
 }
 
@@ -386,7 +385,6 @@ func TestAIAgentConfigDefault_Disabled(t *testing.T) {
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.False(t, dm.Meta.Enabled)
 	assert.Equal(t, "agent", dm.Meta.Mode)
-	assert.Empty(t, dm.Mode, "mode must not appear at root level")
 }
 
 func TestAIAgentConfigDefault_WithInstructions(t *testing.T) {
@@ -409,7 +407,6 @@ func TestAIJudgeConfigDefault_AsLdValueRoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.Equal(t, "toxicity", dm.EvaluationMetricKey)
 	assert.Equal(t, "judge", dm.Meta.Mode)
-	assert.Empty(t, dm.Mode, "mode must not appear at root level")
 	require.Len(t, dm.Messages, 1)
 	assert.Equal(t, "Judge this:", dm.Messages[0].Content)
 }
@@ -429,7 +426,6 @@ func TestAgentDefault_ModeInMeta(t *testing.T) {
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.Equal(t, "agent", dm.Meta.Mode)
-	assert.Empty(t, dm.Mode, "mode must not appear at root level")
 }
 
 func TestJudgeDefault_ModeInMeta(t *testing.T) {
@@ -438,7 +434,6 @@ func TestJudgeDefault_ModeInMeta(t *testing.T) {
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.Equal(t, "judge", dm.Meta.Mode)
-	assert.Empty(t, dm.Mode, "mode must not appear at root level")
 }
 
 func TestCompletionDefault_NoModeKey(t *testing.T) {
@@ -448,7 +443,6 @@ func TestCompletionDefault_NoModeKey(t *testing.T) {
 	var dm datamodel.Config
 	require.NoError(t, json.Unmarshal(v.AsRaw(), &dm))
 	assert.Empty(t, dm.Meta.Mode)
-	assert.Empty(t, dm.Mode)
 }
 
 // ---------------------------------------------------------------------------

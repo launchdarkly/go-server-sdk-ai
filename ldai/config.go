@@ -145,6 +145,7 @@ func (cb *ConfigBuilder) Build() Config {
 		Messages: slices.Clone(cb.messages),
 		Meta: datamodel.Meta{
 			Enabled: cb.enabled,
+			Mode:    cb.mode,
 		},
 		Model: datamodel.Model{
 			Name:       cb.modelName,
@@ -154,7 +155,6 @@ func (cb *ConfigBuilder) Build() Config {
 		Provider: datamodel.Provider{
 			Name: cb.providerName,
 		},
-		Mode:                 cb.mode,
 		EvaluationMetricKey:  cb.evaluationMetricKey,
 		EvaluationMetricKeys: slices.Clone(cb.evaluationMetricKeys),
 		JudgeConfiguration:   cb.judgeConfiguration.Clone(),

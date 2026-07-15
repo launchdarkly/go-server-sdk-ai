@@ -443,8 +443,7 @@ func TestCompletionConfigMethodTracking(t *testing.T) {
 // not the completion-config metric, so judge evaluations are not double-counted on the dashboard.
 func TestJudgeConfigMethodTracking(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"messages": [{"content": "test", "role": "system"}]
 	}`)
@@ -739,8 +738,7 @@ func TestModeFromMetadata(t *testing.T) {
 
 func TestParseJudgeSpecificFields(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"judgeConfiguration": {
 			"judges": [
@@ -773,8 +771,7 @@ func TestParseJudgeSpecificFields(t *testing.T) {
 
 func TestParseEvaluationMetricKeys(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKeys": ["relevance", "accuracy"],
 		"messages": [
 			{"content": "test", "role": "system"}
@@ -794,8 +791,7 @@ func TestParseEvaluationMetricKeys(t *testing.T) {
 
 func TestParseEvaluationMetricKeyPriority(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"evaluationMetricKeys": ["relevance", "accuracy"],
 		"messages": [
@@ -857,8 +853,7 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 // pass during Judge.Evaluate(). Without this, Config's first Mustache pass would render them as empty.
 func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"messages": [
 			{"content": "You are a judge.", "role": "system"},
@@ -1022,8 +1017,7 @@ func TestCreateTracker_TrackerHasCorrectMetadata(t *testing.T) {
 
 func TestCreateTracker_JudgeConfigHasFactory(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"messages": [{"content": "test", "role": "system"}]
 	}`)
