@@ -8,7 +8,7 @@ import (
 
 // AIJudgeConfig represents a judge-mode AI Config retrieved from LaunchDarkly.
 // It provides access to model parameters, provider details, judge messages, and the
-// evaluation metric key. Use Client.JudgeConfig (updated in Task 03) to obtain an instance.
+// evaluation metric key. Use Client.JudgeConfig to obtain an instance.
 //
 // To send analytic events to LaunchDarkly, call CreateTracker to obtain a Tracker.
 type AIJudgeConfig struct {

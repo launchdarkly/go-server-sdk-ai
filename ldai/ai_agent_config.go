@@ -6,7 +6,7 @@ import (
 
 // AIAgentConfig represents an agent-mode AI Config retrieved from LaunchDarkly.
 // It provides access to model parameters, provider details, agent instructions, tools, and
-// judge configuration. Use Client.AgentConfig (added in Task 03) to obtain an instance.
+// judge configuration. Use Client.AgentConfig to obtain an instance.
 //
 // To send analytic events to LaunchDarkly, call CreateTracker to obtain a Tracker.
 type AIAgentConfig struct {
