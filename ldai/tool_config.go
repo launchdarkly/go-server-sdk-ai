@@ -8,7 +8,7 @@ import (
 
 // ToolConfig provides read-only access to a tool definition from the root-level tools map.
 // It is distinct from model.parameters.tools which is passed to LLM providers verbatim and
-// must never be modified by the SDK (AICONF §1.3.3.1.1).
+// must never be modified by the SDK.
 type ToolConfig struct {
 	name             string
 	description      string
