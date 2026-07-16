@@ -117,6 +117,12 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 	return TrackerFromResumptionToken(token, c.sdk, context)
 }
 
+// CreateGraphTracker reconstructs a GraphTracker from a resumption token and the given context.
+// This delegates to TrackerGraphFromResumptionToken. See that function for details.
+func (c *Client) CreateGraphTracker(token string, context ldcontext.Context) (*GraphTracker, error) {
+	return TrackerGraphFromResumptionToken(token, c.sdk, context)
+}
+
 // returnDefault builds an AICompletionConfig from the provided default, wires a tracker factory,
 // and returns it. Used for all error-path returns in evaluateConfig.
 func (c *Client) returnDefault(
@@ -628,7 +634,8 @@ func (c *Client) AgentConfigs(
 
 // AgentGraph retrieves and validates an agent graph for the given graphKey. Always returns a
 // non-nil AgentGraphDefinition. On any validation failure the definition is disabled
-// (Enabled() == false) with an empty node map; traversals are no-ops.
+// (Enabled() == false) with an empty node map; traversals are no-ops. CreateTracker is still
+// wired on disabled graphs (when graphKey is non-blank) so callers can record invocation failure.
 //
 // Pass nil for variables when no interpolation variables are needed.
 //
@@ -650,11 +657,11 @@ func (c *Client) AgentGraph(
 	flagValue, err := c.sdk.JSONVariation(graphKey, context, defaultFlagValue)
 	if err != nil {
 		c.logConfigWarning(graphKey, "agent graph evaluation failed: %v", err)
-		return newDisabledAgentGraphDefinition(disabledGraphFlagValue(), graphKey)
+		return c.disabledAgentGraph(disabledGraphFlagValue(), graphKey, context)
 	}
 
 	parsed := parseGraphFlagValue(flagValue)
-	disabled := newDisabledAgentGraphDefinition(parsed, graphKey)
+	disabled := c.disabledAgentGraph(parsed, graphKey, context)
 
 	if !parsed.enabled {
 		c.logConfigWarning(graphKey, "agent graph is disabled")
@@ -685,12 +692,34 @@ func (c *Client) AgentGraph(
 		configs[key] = cfg
 	}
 
-	return AgentGraphDefinition{
+	def := AgentGraphDefinition{
 		enabled:      true,
 		flagValue:    parsed,
 		nodes:        buildGraphNodes(parsed, configs),
 		graphKey:     graphKey,
 		variationKey: parsed.variationKey,
 		version:      parsed.version,
+	}
+	c.wireGraphTrackerFactory(&def, context)
+	return def
+}
+
+// disabledAgentGraph returns a disabled graph definition with a tracker factory wired.
+func (c *Client) disabledAgentGraph(
+	flagValue graphFlagValue,
+	graphKey string,
+	context ldcontext.Context,
+) AgentGraphDefinition {
+	def := newDisabledAgentGraphDefinition(flagValue, graphKey)
+	c.wireGraphTrackerFactory(&def, context)
+	return def
+}
+
+func (c *Client) wireGraphTrackerFactory(def *AgentGraphDefinition, context ldcontext.Context) {
+	graphKey := def.graphKey
+	variationKey := def.variationKey
+	version := def.version
+	def.trackerFactory = func() *GraphTracker {
+		return newGraphTracker(c.sdk, newRunID(), graphKey, variationKey, version, context, c.logger)
 	}
 }

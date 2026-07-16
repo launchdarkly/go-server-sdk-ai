@@ -46,18 +46,29 @@ func (n *AgentGraphNode) IsTerminal() bool { return len(n.edges) == 0 }
 // AgentGraphDefinition is a fully resolved agent graph returned by Client.AgentGraph.
 //
 // When Enabled returns false, the graph was not fetchable or failed validation; node
-// collections are empty and traversal methods are no-ops.
+// collections are empty and traversal methods are no-ops. CreateTracker remains available
+// on disabled graphs so callers can still record an invocation failure.
 type AgentGraphDefinition struct {
-	enabled      bool
-	flagValue    graphFlagValue
-	nodes        map[string]*AgentGraphNode
-	graphKey     string
-	variationKey string
-	version      int
+	enabled        bool
+	flagValue      graphFlagValue
+	nodes          map[string]*AgentGraphNode
+	graphKey       string
+	variationKey   string
+	version        int
+	trackerFactory func() *GraphTracker
 }
 
 // Enabled reports whether the graph passed validation and all node configs were fetched.
 func (d *AgentGraphDefinition) Enabled() bool { return d.enabled }
+
+// CreateTracker returns a new GraphTracker for a fresh graph invocation.
+// Returns nil if no tracker factory was wired (for example, a blank graph key).
+func (d *AgentGraphDefinition) CreateTracker() *GraphTracker {
+	if d == nil || d.trackerFactory == nil {
+		return nil
+	}
+	return d.trackerFactory()
+}
 
 // RootNode returns the root node, or nil if the graph is disabled or the root is absent.
 func (d *AgentGraphDefinition) RootNode() *AgentGraphNode {
