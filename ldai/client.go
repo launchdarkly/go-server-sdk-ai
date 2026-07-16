@@ -58,6 +58,7 @@ const (
 	usageJudgeConfig      = "$ld:ai:usage:judge-config"
 	usageAgentConfig      = "$ld:ai:usage:agent-config"
 	usageAgentConfigs     = "$ld:ai:usage:agent-configs"
+	usageAgentGraph       = "$ld:ai:usage:agent-graph"
 )
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
@@ -623,4 +624,76 @@ func (c *Client) AgentConfigs(
 		result[req.Key] = c.evaluateAgentConfig(req.Key, context, req.DefaultValue, req.Variables, "")
 	}
 	return result
+}
+
+// AgentGraphNoVariables is a convenience wrapper for AgentGraph with no interpolation variables.
+func (c *Client) AgentGraphNoVariables(graphKey string, context ldcontext.Context) AgentGraphDefinition {
+	return c.AgentGraph(graphKey, context, nil)
+}
+
+// AgentGraph retrieves and validates an agent graph for the given graphKey. Always returns a
+// non-nil AgentGraphDefinition. On any validation failure the definition is disabled
+// (Enabled() == false) with an empty node map; traversals are no-ops.
+//
+// Emits a single $ld:ai:usage:agent-graph event. Node agent configs are fetched without emitting
+// per-node $ld:ai:usage:agent-config events; node trackers include the graph key.
+func (c *Client) AgentGraph(
+	graphKey string,
+	context ldcontext.Context,
+	variables map[string]interface{},
+) AgentGraphDefinition {
+	if strings.TrimSpace(graphKey) == "" {
+		c.logger.Warnf("AI Client: agent graph key must not be blank")
+		return newDisabledAgentGraphDefinition(disabledGraphFlagValue(), graphKey)
+	}
+
+	_ = c.sdk.TrackMetric(usageAgentGraph, context, 1, ldvalue.String(graphKey))
+
+	defaultFlagValue := ldvalue.ObjectBuild().Set("root", ldvalue.String("")).Build()
+	flagValue, err := c.sdk.JSONVariation(graphKey, context, defaultFlagValue)
+	if err != nil {
+		c.logConfigWarning(graphKey, "agent graph evaluation failed: %v", err)
+		return newDisabledAgentGraphDefinition(disabledGraphFlagValue(), graphKey)
+	}
+
+	parsed := parseGraphFlagValue(flagValue)
+	disabled := newDisabledAgentGraphDefinition(parsed, graphKey)
+
+	if !parsed.enabled {
+		c.logConfigWarning(graphKey, "agent graph is disabled")
+		return disabled
+	}
+	if parsed.root == "" {
+		c.logConfigWarning(graphKey, "agent graph has no root node")
+		return disabled
+	}
+
+	allKeys := collectAllKeys(parsed)
+	reachable := collectReachableKeys(parsed)
+	for key := range allKeys {
+		if _, ok := reachable[key]; !ok {
+			c.logConfigWarning(graphKey, "agent graph has unconnected node %q", key)
+			return disabled
+		}
+	}
+
+	configs := make(map[string]AIAgentConfig, len(allKeys))
+	nodeDefault := NewAIAgentConfigDefault().Disabled()
+	for key := range allKeys {
+		cfg := c.evaluateAgentConfig(key, context, nodeDefault, variables, graphKey)
+		if !cfg.Enabled() {
+			c.logConfigWarning(graphKey, "agent config %q in graph is not enabled or could not be fetched", key)
+			return disabled
+		}
+		configs[key] = cfg
+	}
+
+	return AgentGraphDefinition{
+		enabled:      true,
+		flagValue:    parsed,
+		nodes:        buildGraphNodes(parsed, configs),
+		graphKey:     graphKey,
+		variationKey: parsed.variationKey,
+		version:      parsed.version,
+	}
 }
