@@ -65,7 +65,7 @@ type Message struct {
 
 // Tool defines a tool from the root-level "tools" map in the wire format.
 // This is distinct from Model.Parameters["tools"] which is the raw LLM-passable array and
-// must never be modified by the SDK (AICONF §1.3.3.1.1).
+// must never be modified by the SDK.
 type Tool struct {
 	// Name identifies the tool.
 	Name string `json:"name"`

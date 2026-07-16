@@ -97,7 +97,7 @@ type AIMetrics struct {
 	Success bool
 	// Tokens is the optional token usage to record.
 	Tokens *TokenUsage
-	// DurationMs is an optional runner-reported duration override in milliseconds (AITRACK §1.1.13.2).
+	// DurationMs is an optional runner-reported duration override in milliseconds.
 	// When nil, TrackMetricsOf uses the measured wall-clock duration instead.
 	DurationMs *float64
 }
