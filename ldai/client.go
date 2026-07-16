@@ -626,14 +626,11 @@ func (c *Client) AgentConfigs(
 	return result
 }
 
-// AgentGraphNoVariables is a convenience wrapper for AgentGraph with no interpolation variables.
-func (c *Client) AgentGraphNoVariables(graphKey string, context ldcontext.Context) AgentGraphDefinition {
-	return c.AgentGraph(graphKey, context, nil)
-}
-
 // AgentGraph retrieves and validates an agent graph for the given graphKey. Always returns a
 // non-nil AgentGraphDefinition. On any validation failure the definition is disabled
 // (Enabled() == false) with an empty node map; traversals are no-ops.
+//
+// Pass nil for variables when no interpolation variables are needed.
 //
 // Emits a single $ld:ai:usage:agent-graph event. Node agent configs are fetched without emitting
 // per-node $ld:ai:usage:agent-config events; node trackers include the graph key.

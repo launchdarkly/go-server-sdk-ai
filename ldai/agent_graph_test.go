@@ -301,20 +301,6 @@ func TestAgentGraphClient(t *testing.T) {
 		assert.True(t, found)
 	})
 
-	t.Run("no-variables wrapper matches nil variables", func(t *testing.T) {
-		sdk := newMultiFlagMockSDK(map[string][]byte{
-			"my-graph": []byte(`{"root":"agent-a","edges":{}}`),
-			"agent-a":  agentFlagJSON("agent-a", true),
-		})
-		client, err := NewClient(sdk)
-		require.NoError(t, err)
-
-		g1 := client.AgentGraph("my-graph", ctx, nil)
-		g2 := client.AgentGraphNoVariables("my-graph", ctx)
-		assert.Equal(t, g1.Enabled(), g2.Enabled())
-		assert.Equal(t, g1.RootNode().Key(), g2.RootNode().Key())
-	})
-
 	t.Run("blank graphKey returns disabled without usage event", func(t *testing.T) {
 		sdk := newMultiFlagMockSDK(nil)
 		client, err := NewClient(sdk)

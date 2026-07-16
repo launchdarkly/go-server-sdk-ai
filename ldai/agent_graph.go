@@ -28,12 +28,7 @@ type AgentGraphNode struct {
 func (n *AgentGraphNode) Key() string { return n.key }
 
 // Config returns the agent config for this node.
-func (n *AgentGraphNode) Config() *AIAgentConfig {
-	if n == nil {
-		return nil
-	}
-	return &n.config
-}
+func (n *AgentGraphNode) Config() *AIAgentConfig { return &n.config }
 
 // Edges returns a copy of the outgoing edges from this node.
 func (n *AgentGraphNode) Edges() []GraphEdge {
