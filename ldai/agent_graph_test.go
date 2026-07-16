@@ -206,6 +206,54 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 		assert.Equal(t, []string{"a", "b"}, order)
 	})
 
+	t.Run("reverse traverse pure cycle is a no-op", func(t *testing.T) {
+		cycleFlag := graphFlagValue{
+			root:    "a",
+			enabled: true,
+			edges: map[string][]GraphEdge{
+				"a": {{key: "b"}},
+				"b": {{key: "a"}}, // no terminal node exists
+			},
+		}
+		cycleConfigs := map[string]AIAgentConfig{
+			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
+			"b": {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
+		}
+		cycleDef := AgentGraphDefinition{
+			enabled:   true,
+			flagValue: cycleFlag,
+			nodes:     buildGraphNodes(cycleFlag, cycleConfigs),
+		}
+		var order []string
+		cycleDef.ReverseTraverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
+			order = append(order, node.Key())
+			return nil
+		}, nil)
+		assert.Empty(t, order)
+	})
+
+	t.Run("reverse traverse single-node visits root", func(t *testing.T) {
+		singleFlag := graphFlagValue{
+			root:    "a",
+			enabled: true,
+			edges:   map[string][]GraphEdge{},
+		}
+		singleConfigs := map[string]AIAgentConfig{
+			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
+		}
+		singleDef := AgentGraphDefinition{
+			enabled:   true,
+			flagValue: singleFlag,
+			nodes:     buildGraphNodes(singleFlag, singleConfigs),
+		}
+		var order []string
+		singleDef.ReverseTraverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
+			order = append(order, node.Key())
+			return nil
+		}, nil)
+		assert.Equal(t, []string{"a"}, order)
+	})
+
 	t.Run("disabled graph traversals are no-ops", func(t *testing.T) {
 		disabled := newDisabledAgentGraphDefinition(flag, "g")
 		assert.False(t, disabled.Enabled())

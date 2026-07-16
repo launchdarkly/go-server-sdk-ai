@@ -163,8 +163,9 @@ func (d *AgentGraphDefinition) Traverse(fn TraverseFunc, initialContext map[stri
 }
 
 // ReverseTraverse performs a reverse breadth-first traversal starting from terminal nodes
-// and working toward the root. The root node is always processed last. Each node is visited
-// at most once (cycle-safe). This is a no-op when the graph is disabled or has no root.
+// and working toward the root. The root node is processed last when the graph has at least
+// one terminal. Each node is visited at most once (cycle-safe). This is a no-op when the
+// graph is disabled, has no root, or has no terminal nodes (for example a pure cycle).
 func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
 	if root == nil || fn == nil {
@@ -176,11 +177,12 @@ func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext m
 		ctx = make(map[string]interface{})
 	}
 
+	terminals := d.TerminalNodes()
 	visited := make(map[string]struct{})
 	var queue []*AgentGraphNode
 
 	// Seed from terminals, excluding root (it is processed last).
-	for _, terminal := range d.TerminalNodes() {
+	for _, terminal := range terminals {
 		if terminal.key == root.key {
 			continue
 		}
@@ -208,10 +210,13 @@ func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext m
 		}
 	}
 
-	// Process root last.
-	if _, seen := visited[root.key]; !seen {
-		result := fn(root, ctx)
-		ctx[root.key] = result
+	// Process root last only when reverse traversal had a terminal to start from.
+	// A graph with no terminal nodes (for example a pure cycle) is a no-op.
+	if len(terminals) > 0 {
+		if _, seen := visited[root.key]; !seen {
+			result := fn(root, ctx)
+			ctx[root.key] = result
+		}
 	}
 }
 
