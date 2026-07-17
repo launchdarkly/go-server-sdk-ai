@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,29 @@ import (
 	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 )
+
+const graphTrackerContentionGoroutines = 20
+
+// runGraphTrackerContention starts n goroutines that wait on a shared start signal, then
+// each invoke fn once. Using a barrier keeps the race window open instead of serializing
+// launches in a loop.
+func runGraphTrackerContention(n int, fn func()) {
+	var ready, done sync.WaitGroup
+	start := make(chan struct{})
+	ready.Add(n)
+	done.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			fn()
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+}
 
 func makeGraphTracker(events *mockEvents, variationKey string) *GraphTracker {
 	return newGraphTracker(
@@ -283,4 +307,97 @@ func TestGraphTracker_GetSummary_IncludesResumptionToken(t *testing.T) {
 	assert.Equal(t, tracker.ResumptionToken(), summary.ResumptionToken)
 	assert.True(t, summary.Success.IsNone())
 	assert.Nil(t, summary.Path)
+}
+
+func TestGraphTracker_TrackDuration_AtMostOnceUnderContention(t *testing.T) {
+	events := newMockEvents()
+	tracker := makeGraphTracker(events, "")
+
+	runGraphTrackerContention(graphTrackerContentionGoroutines, func() {
+		_ = tracker.TrackDuration(42)
+	})
+
+	assert.Equal(t, 1, countEventsNamed(events, graphDurationTotal))
+	require.True(t, tracker.GetSummary().DurationMs.IsSome())
+	assert.Equal(t, 42.0, tracker.GetSummary().DurationMs.Unwrap())
+}
+
+func TestGraphTracker_TrackTotalTokens_AtMostOnceUnderContention(t *testing.T) {
+	events := newMockEvents()
+	tracker := makeGraphTracker(events, "")
+	usage := TokenUsage{Total: 10, Input: 6, Output: 4}
+
+	runGraphTrackerContention(graphTrackerContentionGoroutines, func() {
+		_ = tracker.TrackTotalTokens(usage)
+	})
+
+	assert.Equal(t, 1, countEventsNamed(events, graphTotalTokens))
+	require.True(t, tracker.GetSummary().Tokens.IsSome())
+	assert.Equal(t, 10, tracker.GetSummary().Tokens.Unwrap().Total)
+}
+
+func TestGraphTracker_TrackPath_AtMostOnceUnderContention(t *testing.T) {
+	events := newMockEvents()
+	tracker := makeGraphTracker(events, "")
+	path := []string{"a", "b"}
+
+	runGraphTrackerContention(graphTrackerContentionGoroutines, func() {
+		_ = tracker.TrackPath(path)
+	})
+
+	assert.Equal(t, 1, countEventsNamed(events, graphPath))
+	assert.Equal(t, []string{"a", "b"}, tracker.GetSummary().Path)
+}
+
+func TestGraphTracker_TrackInvocationSuccess_AtMostOnceUnderContention(t *testing.T) {
+	events := newMockEvents()
+	tracker := makeGraphTracker(events, "")
+
+	runGraphTrackerContention(graphTrackerContentionGoroutines, func() {
+		_ = tracker.TrackInvocationSuccess()
+	})
+
+	assert.Equal(t, 1, countEventsNamed(events, graphInvocationSuccess))
+	assert.Equal(t, 0, countEventsNamed(events, graphInvocationFailure))
+	require.True(t, tracker.GetSummary().Success.IsSome())
+	assert.True(t, tracker.GetSummary().Success.Unwrap())
+}
+
+func TestGraphTracker_TrackInvocation_MutualExclusionUnderContention(t *testing.T) {
+	events := newMockEvents()
+	tracker := makeGraphTracker(events, "")
+
+	var ready, done sync.WaitGroup
+	start := make(chan struct{})
+	n := graphTrackerContentionGoroutines
+	ready.Add(n)
+	done.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			if i%2 == 0 {
+				_ = tracker.TrackInvocationSuccess()
+			} else {
+				_ = tracker.TrackInvocationFailure()
+			}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+
+	successEvents := countEventsNamed(events, graphInvocationSuccess)
+	failureEvents := countEventsNamed(events, graphInvocationFailure)
+	assert.Equal(t, 1, successEvents+failureEvents, "exactly one invocation event should fire")
+	require.True(t, tracker.GetSummary().Success.IsSome())
+	if successEvents == 1 {
+		assert.True(t, tracker.GetSummary().Success.Unwrap())
+		assert.Equal(t, 0, failureEvents)
+	} else {
+		assert.False(t, tracker.GetSummary().Success.Unwrap())
+		assert.Equal(t, 1, failureEvents)
+	}
 }

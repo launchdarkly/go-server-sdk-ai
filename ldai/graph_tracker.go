@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 
 	ldcommon "github.com/launchdarkly/go-sdk-common/v4"
 	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
@@ -50,10 +51,10 @@ type GraphMetricSummary struct {
 }
 
 // GraphTracker records graph-level metrics for a single agent graph invocation.
-// Unless otherwise noted, GraphTracker methods are not safe for concurrent use.
 //
-// Graph-level methods (invocation, duration, tokens, path) are at-most-once.
-// Edge-level methods (redirect, handoff) are multi-fire.
+// Graph-level at-most-once methods (invocation, duration, tokens, path) and GetSummary
+// are safe for concurrent use: the first writer wins and each metric emits at most once.
+// Edge-level methods (redirect, handoff) are multi-fire and do not share that state.
 type GraphTracker struct {
 	runID        string
 	graphKey     string
@@ -64,6 +65,7 @@ type GraphTracker struct {
 	trackData    ldvalue.Value
 	logger       interfaces.LDLoggers
 
+	mu       sync.Mutex
 	success  ldcommon.Option[bool]
 	duration ldcommon.Option[float64]
 	tokens   ldcommon.Option[TokenUsage]
@@ -150,11 +152,14 @@ func TrackerGraphFromResumptionToken(token string, sdk ServerSDK, context ldcont
 //
 // At-most-once and mutually exclusive with TrackInvocationFailure: whichever is called first wins.
 func (t *GraphTracker) TrackInvocationSuccess() error {
+	t.mu.Lock()
 	if t.success.IsSome() {
+		t.mu.Unlock()
 		t.logWarning("Skipping TrackInvocationSuccess: invocation already recorded on this graph tracker.")
 		return nil
 	}
 	t.success = ldcommon.Some(true)
+	t.mu.Unlock()
 	return t.events.TrackMetric(graphInvocationSuccess, t.context, 1, t.trackData)
 }
 
@@ -162,11 +167,14 @@ func (t *GraphTracker) TrackInvocationSuccess() error {
 //
 // At-most-once and mutually exclusive with TrackInvocationSuccess: whichever is called first wins.
 func (t *GraphTracker) TrackInvocationFailure() error {
+	t.mu.Lock()
 	if t.success.IsSome() {
+		t.mu.Unlock()
 		t.logWarning("Skipping TrackInvocationFailure: invocation already recorded on this graph tracker.")
 		return nil
 	}
 	t.success = ldcommon.Some(false)
+	t.mu.Unlock()
 	return t.events.TrackMetric(graphInvocationFailure, t.context, 1, t.trackData)
 }
 
@@ -178,11 +186,14 @@ func (t *GraphTracker) TrackDuration(durationMs float64) error {
 		t.logDebug("Skipping TrackDuration: durationMs is not finite (%v).", durationMs)
 		return nil
 	}
+	t.mu.Lock()
 	if t.duration.IsSome() {
+		t.mu.Unlock()
 		t.logWarning("Skipping TrackDuration: duration already recorded on this graph tracker.")
 		return nil
 	}
 	t.duration = ldcommon.Some(durationMs)
+	t.mu.Unlock()
 	return t.events.TrackMetric(graphDurationTotal, t.context, durationMs, t.trackData)
 }
 
@@ -190,11 +201,14 @@ func (t *GraphTracker) TrackDuration(durationMs float64) error {
 //
 // At-most-once.
 func (t *GraphTracker) TrackTotalTokens(tokens TokenUsage) error {
+	t.mu.Lock()
 	if t.tokens.IsSome() {
+		t.mu.Unlock()
 		t.logWarning("Skipping TrackTotalTokens: token usage already recorded on this graph tracker.")
 		return nil
 	}
 	t.tokens = ldcommon.Some(tokens)
+	t.mu.Unlock()
 	return t.events.TrackMetric(graphTotalTokens, t.context, float64(tokens.Total), t.trackData)
 }
 
@@ -206,14 +220,17 @@ func (t *GraphTracker) TrackPath(path []string) error {
 		t.logDebug("Skipping TrackPath: path was nil or empty.")
 		return nil
 	}
+	t.mu.Lock()
 	if t.path.IsSome() {
+		t.mu.Unlock()
 		t.logWarning("Skipping TrackPath: path already recorded on this graph tracker.")
 		return nil
 	}
 	snapshot := make([]string, len(path))
 	copy(snapshot, path)
 	t.path = ldcommon.Some(snapshot)
-	return t.events.TrackMetric(graphPath, t.context, 1, t.withPathData(path))
+	t.mu.Unlock()
+	return t.events.TrackMetric(graphPath, t.context, 1, t.withPathData(snapshot))
 }
 
 func (t *GraphTracker) withPathData(path []string) ldvalue.Value {
@@ -295,6 +312,9 @@ func (t *GraphTracker) TrackHandoffFailure(sourceKey, targetKey string) error {
 
 // GetSummary returns a snapshot of graph-level metrics recorded so far.
 func (t *GraphTracker) GetSummary() GraphMetricSummary {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	var path []string
 	if t.path.IsSome() {
 		recorded := t.path.Unwrap()
