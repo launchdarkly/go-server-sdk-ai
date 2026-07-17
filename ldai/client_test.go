@@ -1606,6 +1606,75 @@ func TestToolsParity_AgentConfig(t *testing.T) {
 	assert.Equal(t, "search", defaultCfg.Tools()["search"].Name())
 }
 
+// ---- CompletionConfig mode-mismatch tests ----
+
+// TestCompletionConfig_ModeMismatch verifies that a flag whose mode is present and not
+// "completion" falls back to the default and logs a warning.
+func TestCompletionConfig_ModeMismatch(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{"agent mode", "agent"},
+		{"judge mode", "judge"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"_ldMeta": {"variationKey": "1", "enabled": true, "mode": %q},
+				"messages": [{"content": "served message", "role": "user"}]
+			}`, tt.mode))
+			mockSDK := newMockSDK(raw, nil)
+			client, err := NewClient(mockSDK)
+			require.NoError(t, err)
+
+			def := NewAICompletionConfigDefault().WithMessage("default message", datamodel.User)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
+
+			assert.Equal(t, []datamodel.Message{{Content: "default message", Role: datamodel.User}}, cfg.Messages(),
+				"mode mismatch must fall back to default messages")
+			mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "expected mode")
+		})
+	}
+}
+
+// TestCompletionConfig_ModeMissingIsValid verifies that a flag with no mode field is treated
+// as completion and returned normally (no warning).
+func TestCompletionConfig_ModeMissingIsValid(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"messages": [{"content": "Hello {{name}}", "role": "user"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(),
+		map[string]interface{}{"name": "World"})
+
+	assert.Equal(t, []datamodel.Message{{Content: "Hello World", Role: datamodel.User}}, cfg.Messages())
+	mockSDK.log.AssertMessageMatch(t, false, ldlog.Warn, "expected mode")
+}
+
+// TestCompletionConfig_ModeCompletionIsValid verifies that an explicit "completion" mode is
+// returned normally (no warning).
+func TestCompletionConfig_ModeCompletionIsValid(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "completion"},
+		"messages": [{"content": "Hello {{name}}", "role": "user"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(),
+		map[string]interface{}{"name": "World"})
+
+	assert.Equal(t, []datamodel.Message{{Content: "Hello World", Role: datamodel.User}}, cfg.Messages())
+	mockSDK.log.AssertMessageMatch(t, false, ldlog.Warn, "expected mode")
+}
+
 // ---- JudgeConfig mode-mismatch tests ----
 
 // TestJudgeConfig_ModeMismatch verifies that a flag with the wrong mode falls back to the
