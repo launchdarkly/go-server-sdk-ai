@@ -234,6 +234,12 @@ func (c *Client) evaluateConfig(
 		return c.returnDefault(key, context, defaultValue)
 	}
 
+	// A present, non-"completion" mode is a mismatch; a missing mode defaults to "completion".
+	if parsed.Meta.Mode != "" && parsed.Meta.Mode != "completion" {
+		c.logConfigWarning(key, "expected mode %q but got %q; using default", "completion", parsed.Meta.Mode)
+		return c.returnDefault(key, context, defaultValue)
+	}
+
 	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
 	// the wire response so that model.parameters.tools[] is preserved verbatim.
 	raw := parsed
