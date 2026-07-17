@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ const (
 	feedbackNegative  = "$ld:ai:feedback:user:negative"
 	generationSuccess = "$ld:ai:generation:success"
 	generationError   = "$ld:ai:generation:error"
+	toolCallEvent     = "$ld:ai:tool_call"
 	//nolint:gosec
 	timeToFirstToken = "$ld:ai:tokens:ttf"
 	//nolint:gosec
@@ -61,6 +63,10 @@ type MetricSummary struct {
 	Success ldcommon.Option[bool]
 	// TimeToFirstToken is the time to the first token in milliseconds.
 	TimeToFirstToken ldcommon.Option[time.Duration]
+	// ToolCalls contains the tool keys recorded via TrackToolCall.
+	ToolCalls []string
+	// ResumptionToken is the token that can be used to reconstruct this tracker in another process.
+	ResumptionToken string
 }
 
 // Set returns true if any of the fields are non-zero.
@@ -82,6 +88,18 @@ type ProviderResponse struct {
 	Usage TokenUsage
 	// Metrics is the request metrics.
 	Metrics Metrics
+}
+
+// AIMetrics is the mode-agnostic metrics summary returned by an operation
+// passed to TrackMetricsOf.
+type AIMetrics struct {
+	// Success indicates whether the operation succeeded.
+	Success bool
+	// Tokens is the optional token usage to record.
+	Tokens *TokenUsage
+	// DurationMs is an optional runner-reported duration override in milliseconds.
+	// When nil, TrackMetricsOf uses the measured wall-clock duration instead.
+	DurationMs *float64
 }
 
 // Feedback represents the feedback provided by a user for a model evaluation.
@@ -126,6 +144,13 @@ type resumptionPayload struct {
 	GraphKey     string `json:"graphKey,omitempty"`
 }
 
+// trackableConfig is the minimal interface that newTracker needs from a config. Both
+// *AICompletionConfig and *AIJudgeConfig satisfy it via aiConfigBase promotion.
+type trackableConfig interface {
+	ModelName() string
+	ProviderName() string
+}
+
 // Tracker records metrics for a single AI run.
 // Unless otherwise noted, the Tracker's methods are not safe for concurrent use.
 //
@@ -140,7 +165,7 @@ type Tracker struct {
 	variationKey string
 	version      int
 	graphKey     string
-	config       *Config
+	config       trackableConfig
 	context      ldcontext.Context
 	events       EventSink
 	trackData    ldvalue.Value
@@ -152,6 +177,7 @@ type Tracker struct {
 	tokens           ldcommon.Option[TokenUsage]
 	success          ldcommon.Option[bool]
 	timeToFirstToken ldcommon.Option[time.Duration]
+	toolCalls        []string
 }
 
 // Used if a custom Stopwatch is not provided.
@@ -177,7 +203,7 @@ func newTracker(
 	variationKey string,
 	version int,
 	ctx ldcontext.Context,
-	config *Config,
+	config trackableConfig,
 	loggers interfaces.LDLoggers,
 	graphKey string,
 ) *Tracker {
@@ -195,7 +221,7 @@ func newTrackerWithStopwatch(
 	variationKey string,
 	version int,
 	ctx ldcontext.Context,
-	config *Config,
+	config trackableConfig,
 	loggers interfaces.LDLoggers,
 	stopwatch Stopwatch,
 	graphKey string,
@@ -240,9 +266,7 @@ func (t *Tracker) logWarning(format string, args ...interface{}) {
 	t.logger.Warnf(prefix+format, args...)
 }
 
-// ResumptionToken returns a URL-safe Base64-encoded token that can be used to reconstruct a tracker
-// in a different process (e.g., for deferred feedback). The token contains the runId, configKey,
-// variationKey, version, and graphKey when present. It does not contain modelName or providerName.
+// ResumptionToken returns a URL-safe Base64-encoded token for reconstructing this Tracker.
 func (t *Tracker) ResumptionToken() string {
 	payload := resumptionPayload{
 		RunID:        t.runID,
@@ -255,11 +279,8 @@ func (t *Tracker) ResumptionToken() string {
 	return base64.RawURLEncoding.EncodeToString(jsonBytes)
 }
 
-// TrackerFromResumptionToken reconstructs a Tracker from a resumption token and the given context.
-// This is used for cross-process scenarios (e.g., deferred feedback) where the original tracker
-// is no longer available but its runId must be reused. The token is obtained from Tracker.ResumptionToken().
-// The reconstructed tracker will have empty modelName and providerName since these are not included
-// in the token.
+// TrackerFromResumptionToken reconstructs a Tracker from a token produced by
+// Tracker.ResumptionToken, reusing the original runId.
 func TrackerFromResumptionToken(token string, sdk ServerSDK, context ldcontext.Context) (*Tracker, error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
@@ -413,6 +434,65 @@ func (t *Tracker) TrackUsage(usage TokenUsage) error {
 	return t.TrackTokens(usage)
 }
 
+// TrackDurationOf measures the wall-clock duration of operation and tracks it
+// via TrackDuration. Valid for all tracker modes.
+func (t *Tracker) TrackDurationOf(operation func() error) error {
+	t.stopwatch.Start()
+	err := operation()
+	dur := t.stopwatch.Stop()
+	if trackErr := t.TrackDuration(dur); trackErr != nil {
+		t.logWarning("error tracking duration: %v", trackErr)
+	}
+	return err
+}
+
+// TrackMetricsOf runs operation, calls extract to get AIMetrics from the result, then
+// tracks duration (runner-reported DurationMs if set, otherwise wall-clock), success/error,
+// and tokens. Valid for completion, agent, and judge trackers.
+func TrackMetricsOf[T any](t *Tracker, extract func(T) AIMetrics, operation func() (T, error)) (T, error) {
+	t.stopwatch.Start()
+	result, err := operation()
+	measured := t.stopwatch.Stop()
+
+	if err != nil {
+		if e := t.TrackError(); e != nil {
+			t.logWarning("error tracking error metric: %v", e)
+		}
+		return result, err
+	}
+
+	metrics := extract(result)
+
+	if metrics.Success {
+		if e := t.TrackSuccess(); e != nil {
+			t.logWarning("error tracking success metric: %v", e)
+		}
+	} else {
+		if e := t.TrackError(); e != nil {
+			t.logWarning("error tracking error metric: %v", e)
+		}
+	}
+
+	if metrics.DurationMs != nil {
+		dur := time.Duration(*metrics.DurationMs * float64(time.Millisecond))
+		if e := t.TrackDuration(dur); e != nil {
+			t.logWarning("error tracking duration (runner-reported): %v", e)
+		}
+	} else {
+		if e := t.TrackDuration(measured); e != nil {
+			t.logWarning("error tracking duration (measured): %v", e)
+		}
+	}
+
+	if metrics.Tokens != nil {
+		if e := t.TrackTokens(*metrics.Tokens); e != nil {
+			t.logWarning("error tracking tokens: %v", e)
+		}
+	}
+
+	return result, nil
+}
+
 func measureDurationOfTask[T any, A any](
 	stopwatch Stopwatch,
 	arg A,
@@ -423,6 +503,43 @@ func measureDurationOfTask[T any, A any](
 	return result, stopwatch.Stop(), err
 }
 
+// TrackData contains the metadata that is attached to every analytic event emitted by a Tracker.
+type TrackData struct {
+	// RunID is the unique identifier for this AI run.
+	RunID string
+	// ConfigKey is the key of the AI Config.
+	ConfigKey string
+	// Version is the version of the AI Config.
+	Version int
+	// VariationKey is the variation key of the AI Config. Empty if not set.
+	VariationKey string
+	// ModelName is the model name associated with the config.
+	ModelName string
+	// ProviderName is the provider name associated with the config.
+	ProviderName string
+	// GraphKey is the graph key associated with the config. Empty if not set.
+	GraphKey string
+	// AISdkName is the name of the AI SDK.
+	AISdkName string
+	// AISdkVersion is the version of the AI SDK.
+	AISdkVersion string
+}
+
+// GetTrackData returns the metadata that is attached to every analytic event emitted by this Tracker.
+func (t *Tracker) GetTrackData() TrackData {
+	return TrackData{
+		RunID:        t.runID,
+		ConfigKey:    t.key,
+		Version:      t.version,
+		VariationKey: t.variationKey,
+		ModelName:    t.config.ModelName(),
+		ProviderName: t.config.ProviderName(),
+		GraphKey:     t.graphKey,
+		AISdkName:    SDKName,
+		AISdkVersion: Version,
+	}
+}
+
 // GetSummary returns a summary of all metrics that have been tracked using this tracker.
 func (t *Tracker) GetSummary() MetricSummary {
 	return MetricSummary{
@@ -431,6 +548,8 @@ func (t *Tracker) GetSummary() MetricSummary {
 		Tokens:           t.tokens,
 		Success:          t.success,
 		TimeToFirstToken: t.timeToFirstToken,
+		ToolCalls:        slices.Clone(t.toolCalls),
+		ResumptionToken:  t.ResumptionToken(),
 	}
 }
 
@@ -450,8 +569,15 @@ func (t *Tracker) GetSummary() MetricSummary {
 //
 // Subsequent calls re-run the task but emit only metrics not already recorded
 // on this Tracker. Call CreateTracker on the AI Config to start a new run.
+//
+// Deprecated: Use TrackMetricsOf, which is mode-agnostic. TrackRequest is a
+// completion-only convenience and returns an error for agent/judge trackers.
 func (t *Tracker) TrackRequest(task func(c *Config) (ProviderResponse, error)) (ProviderResponse, error) {
-	usage, duration, err := measureDurationOfTask(t.stopwatch, t.config, task)
+	cfg, ok := t.config.(*Config)
+	if !ok {
+		return ProviderResponse{}, fmt.Errorf("TrackRequest is only available for completion configs")
+	}
+	usage, duration, err := measureDurationOfTask(t.stopwatch, cfg, task)
 	if err != nil {
 		if e := t.TrackError(); e != nil {
 			t.logWarning("error tracking error metric for request: %v", e)
@@ -517,6 +643,28 @@ func (t *Tracker) TrackJudgeResponse(response datamodel.JudgeResponse) error {
 
 	if failed {
 		return fmt.Errorf("error tracking evaluation scores")
+	}
+	return nil
+}
+
+// TrackToolCall tracks a single tool invocation. May be called multiple times per Tracker.
+// The toolKey is included in the event data and recorded in the summary.
+func (t *Tracker) TrackToolCall(toolKey string) error {
+	builder := ldvalue.ObjectBuild()
+	for _, key := range t.trackData.Keys(nil) {
+		builder.Set(key, t.trackData.GetByKey(key))
+	}
+	eventData := builder.Set("toolKey", ldvalue.String(toolKey)).Build()
+	t.toolCalls = append(t.toolCalls, toolKey)
+	return t.events.TrackMetric(toolCallEvent, t.context, 1, eventData)
+}
+
+// TrackToolCalls tracks multiple tool invocations. Calls TrackToolCall for each key.
+func (t *Tracker) TrackToolCalls(toolKeys []string) error {
+	for _, key := range toolKeys {
+		if err := t.TrackToolCall(key); err != nil {
+			return err
+		}
 	}
 	return nil
 }

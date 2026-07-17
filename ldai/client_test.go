@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
@@ -143,6 +144,52 @@ func TestConfigExposesVariationKeyAndVersion(t *testing.T) {
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 	assert.Equal(t, "var-1", cfg.VariationKey())
 	assert.Equal(t, 5, cfg.Version())
+}
+
+func TestExplicitVersionZeroInTracker(t *testing.T) {
+	// Version 0 from the wire must be preserved in the tracker's event data.
+	raw := []byte(`{"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 0}}`)
+
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	require.Equal(t, 0, cfg.Version())
+
+	events := newMockEvents()
+	tracker := newTracker(events, newRunID(), "key", cfg.VariationKey(), cfg.Version(), ldcontext.New("user"), &cfg, nil, "")
+	_ = tracker.TrackSuccess()
+
+	require.Len(t, events.events, 1)
+	assert.Equal(t, 0, events.events[0].data.GetByKey("version").IntValue())
+}
+
+func TestVersion_AbsentDefaultsToOne(t *testing.T) {
+	// Wire config with no version field must report Version() == 1.
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 1, cfg.Version())
+}
+
+func TestVersion_ExplicitNonZero(t *testing.T) {
+	// Wire config with an explicit version must be returned verbatim.
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "version": 7}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 7, cfg.Version())
+}
+
+func TestVersion_DefaultPathReturnsOne(t *testing.T) {
+	// Error/default path must report Version() == 1 and have a working CreateTracker.
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, 1, cfg.Version())
+	assert.NotNil(t, cfg.CreateTracker())
 }
 
 func TestParseMultipleMessages(t *testing.T) {
@@ -396,45 +443,6 @@ func TestCompletionConfigMethodTracking(t *testing.T) {
 	assert.ElementsMatch(t, expectedEvents, mockSDK.events)
 }
 
-// TestJudgeConfigMethodTracking verifies that JudgeConfig emits only the judge metric,
-// not the completion-config metric, so judge evaluations are not double-counted on the dashboard.
-func TestJudgeConfigMethodTracking(t *testing.T) {
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
-		"evaluationMetricKey": "toxicity",
-		"messages": [{"content": "test", "role": "system"}]
-	}`)
-	mockSDK := newMockSDK(json, nil)
-	client, err := NewClient(mockSDK)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// Clear the SDK info event from construction.
-	mockSDK.events = nil
-
-	defaultConfig := Disabled()
-	context := ldcontext.New("user-key")
-	configKey := "judge-config-key"
-
-	config := client.JudgeConfig(configKey, context, defaultConfig, nil)
-
-	require.NotNil(t, config.CreateTracker())
-
-	// Only the judge metric should be emitted; evaluateConfig does not emit any metric.
-	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
-	expectedEvents := []mockEvent{
-		{
-			eventName:   "$ld:ai:usage:judge-config",
-			context:     context,
-			metricValue: 1,
-			data:        expectedData,
-		},
-	}
-	assert.ElementsMatch(t, expectedEvents, mockSDK.events,
-		"JudgeConfig must not emit $ld:ai:usage:completion-config to avoid double-counting")
-}
-
 func TestCanSetModelParameters(t *testing.T) {
 	client, err := NewClient(newMockSDK(nil, nil))
 	require.NoError(t, err)
@@ -686,10 +694,18 @@ func TestInterpolation(t *testing.T) {
 	})
 }
 
+func TestModeFromMetadata(t *testing.T) {
+	// Mode carried only in _ldMeta (no root-level "mode" key) must be returned by Mode().
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "mode": "agent"}}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
+	assert.Equal(t, "agent", cfg.Mode())
+}
+
 func TestParseJudgeSpecificFields(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"judgeConfiguration": {
 			"judges": [
@@ -722,8 +738,7 @@ func TestParseJudgeSpecificFields(t *testing.T) {
 
 func TestParseEvaluationMetricKeys(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKeys": ["relevance", "accuracy"],
 		"messages": [
 			{"content": "test", "role": "system"}
@@ -743,8 +758,7 @@ func TestParseEvaluationMetricKeys(t *testing.T) {
 
 func TestParseEvaluationMetricKeyPriority(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
 		"evaluationMetricKey": "toxicity",
 		"evaluationMetricKeys": ["relevance", "accuracy"],
 		"messages": [
@@ -799,34 +813,6 @@ func TestJudgeConfigurationImmutable(t *testing.T) {
 	require.Len(t, retrieved2.Judges, 2)
 	assert.Equal(t, "judge1", retrieved2.Judges[0].Key) // Should still be original value
 	assert.Equal(t, "judge2", retrieved2.Judges[1].Key)
-}
-
-// TestJudgeConfig_PreservesReservedPlaceholders verifies that JudgeConfig injects reserved variables
-// so that {{message_history}} and {{response_to_evaluate}} are preserved for the second interpolation
-// pass during Judge.Evaluate(). Without this, Config's first Mustache pass would render them as empty.
-func TestJudgeConfig_PreservesReservedPlaceholders(t *testing.T) {
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
-		"evaluationMetricKey": "toxicity",
-		"messages": [
-			{"content": "You are a judge.", "role": "system"},
-			{"content": "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", "role": "user"}
-		]
-	}`)
-
-	client, err := NewClient(newMockSDK(json, nil))
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(), nil)
-
-	msgs := cfg.Messages()
-	require.Len(t, msgs, 2)
-	assert.Equal(t, "You are a judge.", msgs[0].Content)
-	assert.Contains(t, msgs[1].Content, "{{message_history}}", "JudgeConfig must preserve placeholder for second interpolation")
-	assert.Contains(t, msgs[1].Content, "{{response_to_evaluate}}", "JudgeConfig must preserve placeholder for second interpolation")
-	assert.Equal(t, "Input: {{message_history}}\nOutput: {{response_to_evaluate}}", msgs[1].Content)
 }
 
 // TestConfig_WithoutReservedVarsWipesJudgePlaceholders documents that Config (without reserved vars)
@@ -969,22 +955,29 @@ func TestCreateTracker_TrackerHasCorrectMetadata(t *testing.T) {
 	assert.NotEmpty(t, data.GetByKey("runId").StringValue())
 }
 
-func TestCreateTracker_JudgeConfigHasFactory(t *testing.T) {
-	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true},
-		"mode": "judge",
-		"evaluationMetricKey": "toxicity",
-		"messages": [{"content": "test", "role": "system"}]
+// TestJudgeConfig_CompletionUnchanged is a regression guard verifying that CompletionConfig
+// still returns AICompletionConfig with its full field set after the evaluateShared refactor.
+func TestJudgeConfig_CompletionUnchanged(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "v-c", "enabled": true},
+		"evaluationMetricKey": "score",
+		"model": {"name": "comp-model"},
+		"provider": {"name": "comp-provider"},
+		"messages": [{"content": "Hi {{who}}", "role": "user"}]
 	}`)
-
-	client, err := NewClient(newMockSDK(json, nil))
+	client, err := NewClient(newMockSDK(raw, nil))
 	require.NoError(t, err)
 
-	cfg := client.JudgeConfig("judge-key", ldcontext.New("user"), Disabled(), nil)
-	assert.True(t, cfg.Enabled())
+	cfg := client.CompletionConfig("comp-key", ldcontext.New("user"), Disabled(), map[string]interface{}{"who": "there"})
 
-	tracker := cfg.CreateTracker()
-	require.NotNil(t, tracker, "enabled judge config should have a tracker factory")
+	assert.True(t, cfg.Enabled())
+	assert.Equal(t, "comp-model", cfg.Model().Name)
+	assert.Equal(t, "comp-provider", cfg.Provider().Name)
+	assert.Equal(t, "score", cfg.EvaluationMetricKey())
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "Hi there", msgs[0].Content)
+	assert.NotNil(t, cfg.CreateTracker())
 }
 
 func TestClient_CreateTracker_RoundTrip(t *testing.T) {

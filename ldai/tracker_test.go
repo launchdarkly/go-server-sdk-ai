@@ -3,6 +3,7 @@ package ldai
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -761,4 +762,335 @@ func TestTrackerFromResumptionToken_GraphKey(t *testing.T) {
 
 	require.NotEmpty(t, sdk.events)
 	assert.Equal(t, "my-graph", sdk.events[0].data.GetByKey("graphKey").StringValue())
+}
+
+func TestTracker_TrackToolCall(t *testing.T) {
+	t.Run("emits tool_call event with toolKey in data and metric value 1", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCall("search"))
+
+		require.Len(t, events.events, 1)
+		evt := events.events[0]
+		assert.Equal(t, "$ld:ai:tool_call", evt.name)
+		assert.Equal(t, 1.0, evt.metricValue)
+		assert.Equal(t, "search", evt.data.GetByKey("toolKey").StringValue())
+	})
+
+	t.Run("may be called multiple times", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCall("search"))
+		assert.NoError(t, tracker.TrackToolCall("calculator"))
+
+		assert.Len(t, events.events, 2)
+		assert.Equal(t, "$ld:ai:tool_call", events.events[0].name)
+		assert.Equal(t, "$ld:ai:tool_call", events.events[1].name)
+		assert.Equal(t, "search", events.events[0].data.GetByKey("toolKey").StringValue())
+		assert.Equal(t, "calculator", events.events[1].data.GetByKey("toolKey").StringValue())
+	})
+
+	t.Run("base trackData keys are preserved in tool call event", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCall("search"))
+
+		runId := extractRunId(t, events)
+		expectedBase := makeTrackData("key", "variationKey", 1, config, runId, "")
+		for _, key := range expectedBase.Keys(nil) {
+			assert.Equal(t, expectedBase.GetByKey(key), events.events[0].data.GetByKey(key),
+				"track data key %q must be preserved", key)
+		}
+	})
+}
+
+func TestTracker_TrackToolCalls(t *testing.T) {
+	t.Run("emits one event per tool key", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		keys := []string{"search", "calculator", "weather"}
+		assert.NoError(t, tracker.TrackToolCalls(keys))
+
+		require.Len(t, events.events, 3)
+		for i, key := range keys {
+			assert.Equal(t, "$ld:ai:tool_call", events.events[i].name)
+			assert.Equal(t, key, events.events[i].data.GetByKey("toolKey").StringValue())
+		}
+	})
+
+	t.Run("empty slice emits no events", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+		assert.NoError(t, tracker.TrackToolCalls([]string{}))
+		assert.Empty(t, events.events)
+	})
+}
+
+func TestTracker_GetSummary_ToolCalls(t *testing.T) {
+	t.Run("empty when no tool calls tracked", func(t *testing.T) {
+		events := newMockEvents()
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil, "")
+
+		assert.Empty(t, tracker.GetSummary().ToolCalls)
+	})
+
+	t.Run("reflects keys passed to TrackToolCall in order", func(t *testing.T) {
+		events := newMockEvents()
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil, "")
+
+		_ = tracker.TrackToolCall("search")
+		_ = tracker.TrackToolCall("calculator")
+		_ = tracker.TrackToolCall("search")
+
+		assert.Equal(t, []string{"search", "calculator", "search"}, tracker.GetSummary().ToolCalls)
+	})
+
+	t.Run("summary ToolCalls is a defensive copy", func(t *testing.T) {
+		events := newMockEvents()
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), &Config{}, nil, "")
+
+		_ = tracker.TrackToolCall("search")
+		summary := tracker.GetSummary()
+		summary.ToolCalls[0] = "mutated"
+
+		assert.Equal(t, []string{"search"}, tracker.GetSummary().ToolCalls)
+	})
+}
+
+func TestTracker_GetSummary_ResumptionToken(t *testing.T) {
+	events := newMockEvents()
+	config := &Config{}
+	tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), config, nil, "")
+
+	summary := tracker.GetSummary()
+
+	assert.NotEmpty(t, summary.ResumptionToken)
+	assert.Equal(t, tracker.ResumptionToken(), summary.ResumptionToken)
+}
+
+func TestTracker_GetTrackData(t *testing.T) {
+	t.Run("all fields populated from constructor args", func(t *testing.T) {
+		events := newMockEvents()
+		config := NewConfig().WithModelName("gpt-4").WithProviderName("openai").Build()
+		tracker := newTracker(events, "fixed-run-id", "my-config", "var-1", 3, ldcontext.New("key"), &config, nil, "my-graph")
+
+		td := tracker.GetTrackData()
+
+		assert.Equal(t, "fixed-run-id", td.RunID)
+		assert.Equal(t, "my-config", td.ConfigKey)
+		assert.Equal(t, 3, td.Version)
+		assert.Equal(t, "var-1", td.VariationKey)
+		assert.Equal(t, "gpt-4", td.ModelName)
+		assert.Equal(t, "openai", td.ProviderName)
+		assert.Equal(t, "my-graph", td.GraphKey)
+		assert.Equal(t, SDKName, td.AISdkName)
+		assert.Equal(t, Version, td.AISdkVersion)
+	})
+
+	t.Run("empty optional fields when not set", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTracker(events, newRunID(), "key", "", 1, ldcontext.New("key"), config, nil, "")
+
+		td := tracker.GetTrackData()
+
+		assert.Empty(t, td.VariationKey)
+		assert.Empty(t, td.GraphKey)
+	})
+}
+
+func TestExplicitVersionZeroInResumptionToken(t *testing.T) {
+	// A tracker with version 0 must encode and decode 0, not 1.
+	events := newMockEvents()
+	config := NewConfig().Build()
+	tracker := newTracker(events, newRunID(), "key", "var", 0, ldcontext.New("user"), &config, nil, "")
+
+	token := tracker.ResumptionToken()
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	require.NoError(t, err)
+
+	var payload struct {
+		Version int `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(decoded, &payload))
+	assert.Equal(t, 0, payload.Version)
+}
+
+func ptrFloat64(v float64) *float64 { return &v }
+
+func TestTrackDurationOf(t *testing.T) {
+	t.Run("tracks measured duration and returns nil error", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(55*time.Millisecond), "")
+
+		err := tracker.TrackDurationOf(func() error { return nil })
+
+		assert.NoError(t, err)
+		require.Len(t, events.events, 1)
+		assert.Equal(t, "$ld:ai:duration:total", events.events[0].name)
+		assert.Equal(t, 55.0, events.events[0].metricValue)
+	})
+
+	t.Run("returns operation error and still tracks duration", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(10*time.Millisecond), "")
+
+		opErr := fmt.Errorf("boom")
+		err := tracker.TrackDurationOf(func() error { return opErr })
+
+		assert.Equal(t, opErr, err)
+		require.Len(t, events.events, 1)
+		assert.Equal(t, "$ld:ai:duration:total", events.events[0].name)
+	})
+}
+
+func TestTrackMetricsOf(t *testing.T) {
+	t.Run("completion tracker: tracks duration, success, and tokens", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(20*time.Millisecond), "")
+
+		type result struct{ val string }
+		tokens := TokenUsage{Total: 10, Input: 4, Output: 6}
+
+		got, err := TrackMetricsOf(tracker,
+			func(r result) AIMetrics {
+				return AIMetrics{Success: true, Tokens: &tokens}
+			},
+			func() (result, error) { return result{"ok"}, nil },
+		)
+
+		assert.NoError(t, err)
+		assert.Equal(t, result{"ok"}, got)
+
+		names := make([]string, len(events.events))
+		for i, e := range events.events {
+			names[i] = e.name
+		}
+		assert.Contains(t, names, "$ld:ai:generation:success")
+		assert.Contains(t, names, "$ld:ai:duration:total")
+		assert.Contains(t, names, "$ld:ai:tokens:total")
+
+		for _, e := range events.events {
+			if e.name == "$ld:ai:duration:total" {
+				assert.Equal(t, 20.0, e.metricValue)
+			}
+		}
+	})
+
+	t.Run("judge tracker: works without completion-only rejection", func(t *testing.T) {
+		events := newMockEvents()
+		judgeConfig := &AIJudgeConfig{}
+		tracker := newTracker(events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"), judgeConfig, nil, "")
+
+		_, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics { return AIMetrics{} },
+			func() (struct{}, error) { return struct{}{}, nil },
+		)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("DurationMs override used instead of wall-clock", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(99*time.Millisecond), "")
+
+		_, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics {
+				return AIMetrics{DurationMs: ptrFloat64(100.0)}
+			},
+			func() (struct{}, error) { return struct{}{}, nil },
+		)
+
+		assert.NoError(t, err)
+		for _, e := range events.events {
+			if e.name == "$ld:ai:duration:total" {
+				assert.Equal(t, 100.0, e.metricValue, "runner-reported duration should be used")
+				return
+			}
+		}
+		t.Fatal("expected a duration event")
+	})
+
+	t.Run("error path: tracks error, no success or tokens", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(5*time.Millisecond), "")
+
+		opErr := fmt.Errorf("model failed")
+		tokens := TokenUsage{Total: 5}
+
+		_, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics {
+				return AIMetrics{Tokens: &tokens}
+			},
+			func() (struct{}, error) { return struct{}{}, opErr },
+		)
+
+		assert.Equal(t, opErr, err)
+
+		for _, e := range events.events {
+			assert.NotEqual(t, "$ld:ai:generation:success", e.name)
+			assert.NotEqual(t, "$ld:ai:tokens:total", e.name)
+		}
+
+		errorEvents := 0
+		for _, e := range events.events {
+			if e.name == "$ld:ai:generation:error" {
+				errorEvents++
+			}
+		}
+		assert.Equal(t, 1, errorEvents, "expected exactly one error event")
+	})
+
+	t.Run("Success:false with nil error emits generation:error not generation:success", func(t *testing.T) {
+		events := newMockEvents()
+		config := &Config{}
+		tracker := newTrackerWithStopwatch(
+			events, newRunID(), "key", "variationKey", 1, ldcontext.New("key"),
+			config, nil, mockStopwatch(10*time.Millisecond), "")
+
+		got, err := TrackMetricsOf(tracker,
+			func(_ struct{}) AIMetrics { return AIMetrics{Success: false} },
+			func() (struct{}, error) { return struct{}{}, nil },
+		)
+
+		assert.NoError(t, err)
+		assert.Equal(t, struct{}{}, got)
+
+		for _, e := range events.events {
+			assert.NotEqual(t, "$ld:ai:generation:success", e.name, "must not emit success when Success is false")
+		}
+
+		errorEvents := 0
+		for _, e := range events.events {
+			if e.name == "$ld:ai:generation:error" {
+				errorEvents++
+			}
+		}
+		assert.Equal(t, 1, errorEvents, "expected exactly one error event when Success is false")
+	})
 }

@@ -3,7 +3,9 @@ package ldai
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 
@@ -18,8 +20,8 @@ import (
 const ldContextVariable = "ldctx"
 
 // JudgePlaceholderMessageHistory and JudgePlaceholderResponseToEvaluate are the literal placeholder
-// strings shared between JudgeConfig (pass 1) and Judge.buildMessages (pass 2). Both must use the
-// same values or substitution silently fails.
+// strings injected during judge config evaluation (pass 1) and consumed by Judge.buildMessages (pass 2).
+// Both passes must use the same values or substitution silently fails.
 const (
 	JudgePlaceholderMessageHistory     = "{{message_history}}"
 	JudgePlaceholderResponseToEvaluate = "{{response_to_evaluate}}"
@@ -52,7 +54,6 @@ type Client struct {
 const (
 	sdkInfoEvent          = "$ld:ai:sdk:info"
 	usageCompletionConfig = "$ld:ai:usage:completion-config"
-	usageJudgeConfig      = "$ld:ai:usage:judge-config"
 )
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
@@ -114,44 +115,45 @@ func (c *Client) CreateTracker(token string, context ldcontext.Context) (*Tracke
 // returnDefault sets a tracker factory on a copy of def (so CreateTracker always works) and
 // returns the resulting Config. Used for all error-path returns in evaluateConfig.
 func (c *Client) returnDefault(key string, context ldcontext.Context, def Config) Config {
+	def.key = key
 	def.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, def.VariationKey(), def.Version(), context, &def, c.logger, "")
 	}
 	return def
 }
 
-// evaluateConfig fetches and interpolates an AI Config without emitting any metric.
-// Callers (CompletionConfig, JudgeConfig) are meant to emit their own metric before calling this.
-func (c *Client) evaluateConfig(
+// evaluateShared fetches, validates, unmarshals, and interpolates a config. On any failure it
+// returns ok=false; the caller is responsible for returning its own typed default. On success it
+// returns the parsed wire config, the interpolated messages, and the resolved tools.
+func (c *Client) evaluateShared(
 	key string,
 	context ldcontext.Context,
-	defaultValue Config,
+	defaultLdValue ldvalue.Value,
 	variables map[string]interface{},
-) Config {
-	result, err := c.sdk.JSONVariation(key, context, defaultValue.AsLdValue())
+) (
+	parsed datamodel.Config,
+	interpolated []datamodel.Message,
+	tools map[string]ToolConfig,
+	ok bool,
+) {
+	result, err := c.sdk.JSONVariation(key, context, defaultLdValue)
 	if err != nil {
-		// The evaluation failed (e.g. flag not found, client not initialized), so the SDK returned the
-		// default value. Return it as-is: interpolation is not applied to the default value's messages.
-		return c.returnDefault(key, context, defaultValue)
+		return datamodel.Config{}, nil, nil, false
 	}
 
-	// The spec requires the config to at least be an object (although all properties are optional, so it may be an
-	// empty object.)
 	if result.Type() != ldvalue.ObjectType {
 		c.logConfigWarning(key, "unmarshalling failed, expected JSON object but got %s", result.Type().String())
-		return c.returnDefault(key, context, defaultValue)
+		return datamodel.Config{}, nil, nil, false
 	}
 
-	var parsed datamodel.Config
 	if err := json.Unmarshal(result.AsRaw(), &parsed); err != nil {
 		c.logConfigWarning(key, "unmarshalling failed: %v", err)
-		return c.returnDefault(key, context, defaultValue)
+		return datamodel.Config{}, nil, nil, false
 	}
 
 	mergedVariables := map[string]interface{}{
 		ldContextVariable: getAllAttributes(context),
 	}
-
 	for k, v := range variables {
 		if k == ldContextVariable {
 			c.logConfigWarning(key, "config variables contains 'ldctx', which is reserved and cannot be overwritten")
@@ -160,37 +162,57 @@ func (c *Client) evaluateConfig(
 		mergedVariables[k] = v
 	}
 
-	builder := NewConfig().
-		WithModelName(parsed.Model.Name).
-		WithProviderName(parsed.Provider.Name).
-		WithEnabled(parsed.Meta.Enabled).
-		WithMode(parsed.Mode).
-		WithEvaluationMetricKey(parsed.EvaluationMetricKey).
-		WithEvaluationMetricKeys(parsed.EvaluationMetricKeys).
-		WithJudgeConfiguration(parsed.JudgeConfiguration)
-
-	for k, v := range parsed.Model.Parameters {
-		builder.WithModelParam(k, v)
-	}
-
-	for k, v := range parsed.Model.Custom {
-		builder.WithCustomModelParam(k, v)
-	}
-
+	msgs := make([]datamodel.Message, 0, len(parsed.Messages))
 	for i, msg := range parsed.Messages {
 		content, err := interpolateTemplate(msg.Content, mergedVariables)
 		if err != nil {
-			c.logConfigWarning(key,
-				"malformed message at index %d: %v", i, err,
-			)
-			return c.returnDefault(key, context, defaultValue)
+			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
+			return datamodel.Config{}, nil, nil, false
 		}
-		builder.WithMessage(content, msg.Role)
+		msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
-	cfg := builder.Build()
-	cfg.c.Meta.VariationKey = parsed.Meta.VariationKey
-	cfg.c.Meta.Version = parsed.Meta.Version
+	return parsed, msgs, c.resolveTools(key, result), true
+}
+
+// evaluateConfig fetches and interpolates an AI Config without emitting any metric.
+// Callers are meant to emit their own metric before calling this.
+func (c *Client) evaluateConfig(
+	key string,
+	context ldcontext.Context,
+	defaultValue Config,
+	variables map[string]interface{},
+) Config {
+	parsed, interpolatedMessages, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables)
+	if !ok {
+		return c.returnDefault(key, context, defaultValue)
+	}
+
+	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
+	// the wire response so that model.parameters.tools[] is preserved verbatim.
+	raw := parsed
+	raw.Messages = interpolatedMessages
+
+	cfg := AICompletionConfig{
+		aiConfigBase: aiConfigBase{
+			key:          key,
+			enabled:      parsed.Meta.Enabled,
+			variationKey: parsed.Meta.VariationKey,
+			version:      defaultVersion(parsed.Meta.Version),
+			model: ModelConfig{
+				Name:       parsed.Model.Name,
+				Parameters: maps.Clone(parsed.Model.Parameters),
+				Custom:     maps.Clone(parsed.Model.Custom),
+			},
+			provider: ProviderConfig{Name: parsed.Provider.Name},
+			tools:    tools,
+		},
+		messages:             interpolatedMessages,
+		judgeConfiguration:   parsed.JudgeConfiguration.Clone(),
+		evaluationMetricKey:  parsed.EvaluationMetricKey,
+		evaluationMetricKeys: slices.Clone(parsed.EvaluationMetricKeys),
+		raw:                  raw,
+	}
 
 	cfg.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger, "")
@@ -260,35 +282,64 @@ func interpolateTemplate(template string, variables map[string]interface{}) (str
 	return m.RenderString(variables)
 }
 
-// JudgeConfig retrieves a Judge AI Config and interpolates its message templates. The reserved
-// variables message_history and response_to_evaluate are preserved as literal placeholders for
-// substitution by Judge.buildMessages during evaluation.
-//
-// To send analytic events to LaunchDarkly, call CreateTracker on the returned Config to obtain a Tracker.
-func (c *Client) JudgeConfig(
-	key string,
-	context ldcontext.Context,
-	defaultValue Config,
-	variables map[string]interface{},
-) Config {
-	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
-	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
+// resolveTools determines the tools map to expose on the config.
+// The root-level "tools" key is authoritative (even when empty), suppressing any legacy fallback.
+// When the root key is absent, the legacy model.parameters.tools[] array is used instead.
+// Malformed or unnamed entries in the legacy array are skipped with a warning; the config is
+// still returned (not defaulted). Root-level entries are always valid objects because
+// json.Unmarshal would have failed before this function is reached if they were not.
+func (c *Client) resolveTools(key string, served ldvalue.Value) map[string]ToolConfig {
+	// Check for the presence of the root "tools" key (absent ≠ null).
+	toolsKeyPresent := slices.Contains(served.Keys(nil), "tools")
 
-	// Extend variables with reserved judge placeholders
-	extendedVariables := make(map[string]interface{})
-	for k, v := range variables {
-		// Warn if user tries to override reserved variables
-		if k == "message_history" || k == "response_to_evaluate" {
-			c.logger.Warnf("AI Config '%s': variable '%s' is reserved by judge and will be ignored", key, k)
-			continue
+	if toolsKeyPresent {
+		toolsVal := served.GetByKey("tools")
+		if toolsVal.Type() != ldvalue.ObjectType {
+			// Key present but value is not an object (e.g. null). No tools, no fallback.
+			return nil
 		}
-		extendedVariables[k] = v
+		tools := make(map[string]ToolConfig, toolsVal.Count())
+		for _, k := range toolsVal.Keys(nil) {
+			tools[k] = toolConfigFromRawValue(toolsVal.GetByKey(k), k)
+		}
+		return emptyToNil(tools)
 	}
 
-	// Inject reserved variables as literal placeholder strings
-	// These will be preserved through the first interpolation and resolved during Judge.Evaluate()
-	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
-	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
+	// Root key absent — fall back to model.parameters.tools[].
+	legacyTools := served.GetByKey("model").GetByKey("parameters").GetByKey("tools")
+	if legacyTools.Type() != ldvalue.ArrayType {
+		return nil
+	}
 
-	return c.evaluateConfig(key, context, defaultValue, extendedVariables)
+	tools := make(map[string]ToolConfig)
+	for i := range legacyTools.Count() {
+		v := legacyTools.GetByIndex(i)
+		if v.Type() != ldvalue.ObjectType {
+			c.logConfigWarning(key, "model.parameters.tools[%d] is not an object; skipping", i)
+			continue
+		}
+		name := v.GetByKey("name").StringValue()
+		if name == "" {
+			c.logConfigWarning(key, "model.parameters.tools[%d] has no 'name'; skipping", i)
+			continue
+		}
+		tools[name] = toolConfigFromRawValue(v, name)
+	}
+	return emptyToNil(tools)
+}
+
+// emptyToNil returns nil when tools is empty so that "no tools" is uniform across all callers.
+func emptyToNil(tools map[string]ToolConfig) map[string]ToolConfig {
+	if len(tools) == 0 {
+		return nil
+	}
+	return tools
+}
+
+// defaultVersion returns the dereferenced version, or 1 when absent from the wire.
+func defaultVersion(v *int) int {
+	if v == nil {
+		return 1
+	}
+	return *v
 }

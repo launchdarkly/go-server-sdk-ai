@@ -16,6 +16,10 @@ type Meta struct {
 
 	// Version is the version of the Variation.
 	Version *int `json:"version,omitempty"`
+
+	// Mode is the AI Config mode (e.g., "completion", "agent", "judge").
+	// A missing mode defaults to "completion".
+	Mode string `json:"mode,omitempty"`
 }
 
 // Model defines the serialization format for a model.
@@ -59,6 +63,26 @@ type Message struct {
 	Role Role `json:"role"`
 }
 
+// Tool defines a tool from the root-level "tools" map in the wire format.
+// This is distinct from Model.Parameters["tools"] which is the raw LLM-passable array and
+// must never be modified by the SDK.
+type Tool struct {
+	// Name identifies the tool.
+	Name string `json:"name"`
+
+	// Description is a human-readable description of the tool.
+	Description string `json:"description,omitempty"`
+
+	// Type is the tool type (e.g., "function").
+	Type string `json:"type,omitempty"`
+
+	// Parameters are the tool's parameter definitions.
+	Parameters map[string]ldvalue.Value `json:"parameters,omitempty"`
+
+	// CustomParameters are custom, user-defined tool parameters.
+	CustomParameters map[string]ldvalue.Value `json:"customParameters,omitempty"`
+}
+
 // Config defines the serialization format for an AI Config.
 type Config struct {
 	// Messages is a list of messages. The messages received from LaunchDarkly are uninterpolated.
@@ -73,9 +97,6 @@ type Config struct {
 	// Provider is the provider.
 	Provider Provider `json:"provider,omitempty"`
 
-	// Mode is the AI Config mode (e.g., "completion", "agent", "judge").
-	Mode string `json:"mode,omitempty"`
-
 	// EvaluationMetricKey is the evaluation metric key for judge mode configs.
 	EvaluationMetricKey string `json:"evaluationMetricKey,omitempty"`
 
@@ -85,6 +106,13 @@ type Config struct {
 
 	// JudgeConfiguration specifies judges attached to this config.
 	JudgeConfiguration *JudgeConfiguration `json:"judgeConfiguration,omitempty"`
+
+	// Tools is a root-level map of tool name to tool configuration.
+	// Distinct from Model.Parameters["tools"] which is the raw LLM-passable array.
+	Tools map[string]Tool `json:"tools,omitempty"`
+
+	// Instructions is the agent's system instructions string (agent mode only).
+	Instructions string `json:"instructions,omitempty"`
 }
 
 // JudgeConfiguration defines the configuration for judges attached to a config.

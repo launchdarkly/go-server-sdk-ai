@@ -6,18 +6,21 @@ import (
 	"math/rand"
 	"strings"
 
-	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 	"github.com/launchdarkly/go-server-sdk-ai/ldai"
 	"github.com/launchdarkly/go-server-sdk-ai/ldai/datamodel"
 	"github.com/launchdarkly/go-server-sdk/v7/interfaces"
 )
 
-// Config defines the subset of an AI Config that a Judge requires. This is satisfied by *ldai.Config.
+// Config defines the subset of an AI Config that a Judge requires.
+// It is satisfied by *ldai.AIJudgeConfig (primary) and *ldai.AICompletionConfig (deprecated).
 type Config interface {
 	Messages() []datamodel.Message
-	ModelParam(key string) (ldvalue.Value, bool)
-	CustomModelParam(key string) (ldvalue.Value, bool)
 	EvaluationMetricKey() string
+}
+
+// configWithLegacyMetricKeys is an optional extension of Config for types that carry the
+// deprecated evaluationMetricKeys array. Checked via type assertion in getMetricKey.
+type configWithLegacyMetricKeys interface {
 	EvaluationMetricKeys() []string
 }
 
@@ -29,7 +32,8 @@ type Tracker interface {
 
 // Compile-time assertions that the ldai package's types satisfy these interfaces.
 var (
-	_ Config  = (*ldai.Config)(nil)
+	_ Config  = (*ldai.AIJudgeConfig)(nil)
+	_ Config  = (*ldai.AICompletionConfig)(nil)
 	_ Tracker = (*ldai.Tracker)(nil)
 )
 
@@ -235,19 +239,20 @@ func (j *Judge) parseResponse(data map[string]interface{}) *datamodel.JudgeRespo
 }
 
 func getMetricKey(config Config, logger interfaces.LDLoggers, configKey string) (string, error) {
-	// Priority 1: Check top-level evaluationMetricKey field (primary field)
+	// Priority 1: primary evaluationMetricKey field.
 	if metricKey := config.EvaluationMetricKey(); strings.TrimSpace(metricKey) != "" {
 		return strings.TrimSpace(metricKey), nil
 	}
 
-	// Priority 2: Check top-level evaluationMetricKeys array (deprecated)
-	keys := config.EvaluationMetricKeys()
-	for _, key := range keys {
-		if trimmed := strings.TrimSpace(key); trimmed != "" {
-			if logger != nil {
-				logger.Warnf("Judge config %q: using deprecated evaluationMetricKeys; use evaluationMetricKey instead", configKey)
+	// Priority 2: deprecated evaluationMetricKeys array (optional interface).
+	if lc, ok := config.(configWithLegacyMetricKeys); ok {
+		for _, key := range lc.EvaluationMetricKeys() {
+			if trimmed := strings.TrimSpace(key); trimmed != "" {
+				if logger != nil {
+					logger.Warnf("Judge config %q: using deprecated evaluationMetricKeys; use evaluationMetricKey instead", configKey)
+				}
+				return trimmed, nil
 			}
-			return trimmed, nil
 		}
 	}
 
