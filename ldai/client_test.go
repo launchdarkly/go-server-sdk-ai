@@ -283,7 +283,7 @@ func TestParseInvalidConfigReturnsDefault(t *testing.T) {
 
 			cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 			// Verify config data matches the default
-			assert.Equal(t, def.AsLdValue(), cfg.AsLdValue())
+			assert.Equal(t, []datamodel.Message{{Role: datamodel.User, Content: "hello"}}, cfg.Messages())
 			// Verify CreateTracker() now works (returnDefault always injects a factory)
 			assert.NotNil(t, cfg.CreateTracker())
 
@@ -1774,7 +1774,7 @@ func TestCompletionConfig_BadMessagesFallsBack(t *testing.T) {
 	def := NewAICompletionConfigDefault().WithMessage("Default message.", datamodel.User)
 	cfg := client.CompletionConfig("completion-key", ldcontext.New("user"), def, nil)
 
-	assert.Equal(t, def.AsLdValue(), cfg.AsLdValue(),
+	assert.Equal(t, []datamodel.Message{{Role: datamodel.User, Content: "Default message."}}, cfg.Messages(),
 		"malformed completion message must fall back to default")
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "malformed message at index")
 }
