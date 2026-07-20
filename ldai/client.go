@@ -59,6 +59,10 @@ const (
 	usageAgentConfig      = "$ld:ai:usage:agent-config"
 	usageAgentConfigs     = "$ld:ai:usage:agent-configs"
 	usageAgentGraph       = "$ld:ai:usage:agent-graph"
+
+	usageCompletionConfigTemplate = "$ld:ai:usage:completion-config-template"
+	usageAgentConfigTemplate      = "$ld:ai:usage:agent-config-template"
+	usageJudgeConfigTemplate      = "$ld:ai:usage:judge-config-template"
 )
 
 // NewClient creates a new AI Client. The provided SDK interface must not be nil. The client will use the provided SDK's
@@ -108,7 +112,53 @@ func (c *Client) CompletionConfig(
 ) AICompletionConfig {
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageCompletionConfig, context, 1, data)
-	return c.evaluateConfig(key, context, defaultValue, variables)
+	return c.evaluateConfig(key, context, defaultValue, variables, true)
+}
+
+// CompletionConfigTemplate retrieves an AI completion config without performing Mustache
+// interpolation on message content. Useful when the caller wants to perform its own interpolation
+// or pass raw templates to an external system. Returns the default value if the config cannot be
+// evaluated.
+//
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned AICompletionConfig to obtain a Tracker.
+func (c *Client) CompletionConfigTemplate(
+	key string,
+	context ldcontext.Context,
+	defaultValue AICompletionConfigDefault,
+) AICompletionConfig {
+	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
+	_ = c.sdk.TrackMetric(usageCompletionConfigTemplate, context, 1, data)
+	return c.evaluateConfig(key, context, defaultValue, nil, false)
+}
+
+// AgentConfigTemplate retrieves an AI agent config without performing Mustache interpolation on
+// its instructions. Useful when the caller wants to perform its own interpolation or pass the raw
+// template to an external system. Returns the default value if the config cannot be evaluated.
+//
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIAgentConfig to obtain a Tracker.
+func (c *Client) AgentConfigTemplate(
+	key string,
+	context ldcontext.Context,
+	defaultValue AIAgentConfigDefault,
+) AIAgentConfig {
+	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
+	_ = c.sdk.TrackMetric(usageAgentConfigTemplate, context, 1, data)
+	return c.evaluateAgentConfig(key, context, defaultValue, nil, "", false)
+}
+
+// JudgeConfigTemplate retrieves an AI judge config without performing Mustache interpolation on
+// its messages. Useful when the caller wants to perform its own interpolation or pass raw templates
+// to an external system. Returns the default value if the config cannot be evaluated.
+//
+// To send analytic events to LaunchDarkly, call CreateTracker on the returned AIJudgeConfig to obtain a Tracker.
+func (c *Client) JudgeConfigTemplate(
+	key string,
+	context ldcontext.Context,
+	defaultValue AIJudgeConfigDefault,
+) AIJudgeConfig {
+	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
+	_ = c.sdk.TrackMetric(usageJudgeConfigTemplate, context, 1, data)
+	return c.evaluateJudgeConfig(key, context, defaultValue, nil, false)
 }
 
 // CreateTracker reconstructs a Tracker from a resumption token and the given context.
@@ -176,6 +226,10 @@ func (c *Client) evaluateShared(
 		return datamodel.Config{}, nil, nil, false
 	}
 
+	if !interpolateMessages {
+		return parsed, parsed.Messages, c.resolveTools(key, result), true
+	}
+
 	mergedVariables := map[string]interface{}{
 		ldContextVariable: getAllAttributes(context),
 	}
@@ -187,31 +241,30 @@ func (c *Client) evaluateShared(
 		mergedVariables[k] = v
 	}
 
-	var msgs []datamodel.Message
-	if interpolateMessages {
-		msgs = make([]datamodel.Message, 0, len(parsed.Messages))
-		for i, msg := range parsed.Messages {
-			content, err := interpolateTemplate(msg.Content, mergedVariables)
-			if err != nil {
-				c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
-				return datamodel.Config{}, nil, nil, false
-			}
-			msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
+	msgs := make([]datamodel.Message, 0, len(parsed.Messages))
+	for i, msg := range parsed.Messages {
+		content, err := interpolateTemplate(msg.Content, mergedVariables)
+		if err != nil {
+			c.logConfigWarning(key, "malformed message at index %d: %v", i, err)
+			return datamodel.Config{}, nil, nil, false
 		}
+		msgs = append(msgs, datamodel.Message{Content: content, Role: msg.Role})
 	}
 
 	return parsed, msgs, c.resolveTools(key, result), true
 }
 
-// evaluateConfig fetches and interpolates a completion config without emitting any metric.
-// CompletionConfig emits its own metric before calling this.
+// evaluateConfig fetches and optionally interpolates a completion config without emitting any
+// metric. CompletionConfig emits its own metric before calling this.
 func (c *Client) evaluateConfig(
 	key string,
 	context ldcontext.Context,
 	defaultValue AICompletionConfigDefault,
 	variables map[string]interface{},
+	interpolate bool,
 ) AICompletionConfig {
-	parsed, interpolatedMessages, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables, true)
+	parsed, interpolatedMessages, tools, ok := c.evaluateShared(
+		key, context, defaultValue.AsLdValue(), variables, interpolate)
 	if !ok {
 		return c.returnDefault(key, context, defaultValue)
 	}
@@ -398,29 +451,35 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 	return cfg
 }
 
-// evaluateJudgeConfig fetches, validates, and interpolates a judge config without emitting
-// any metric. JudgeConfig emits its own metric before calling this.
+// evaluateJudgeConfig builds a judge config without emitting a usage event. When interpolate is false,
+// messages are returned verbatim and the reserved judge placeholders are not injected.
 func (c *Client) evaluateJudgeConfig(
 	key string,
 	context ldcontext.Context,
 	defaultValue AIJudgeConfigDefault,
 	variables map[string]interface{},
+	interpolate bool,
 ) AIJudgeConfig {
-	// Extend variables with reserved judge placeholders so that {{message_history}} and
-	// {{response_to_evaluate}} survive the first Mustache pass for substitution by
-	// Judge.buildMessages during evaluation.
-	extendedVariables := make(map[string]interface{})
-	for k, v := range variables {
-		if k == "message_history" || k == "response_to_evaluate" {
-			c.logger.Warnf("AI Config '%s': variable '%s' is reserved by judge and will be ignored", key, k)
-			continue
+	var queryVariables map[string]interface{}
+	if interpolate {
+		// Extend variables with reserved judge placeholders so that {{message_history}} and
+		// {{response_to_evaluate}} survive the first Mustache pass for substitution by
+		// Judge.buildMessages during evaluation.
+		extendedVariables := make(map[string]interface{})
+		for k, v := range variables {
+			if k == "message_history" || k == "response_to_evaluate" {
+				c.logger.Warnf("AI Config '%s': variable '%s' is reserved by judge and will be ignored", key, k)
+				continue
+			}
+			extendedVariables[k] = v
 		}
-		extendedVariables[k] = v
+		extendedVariables["message_history"] = JudgePlaceholderMessageHistory
+		extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
+		queryVariables = extendedVariables
 	}
-	extendedVariables["message_history"] = JudgePlaceholderMessageHistory
-	extendedVariables["response_to_evaluate"] = JudgePlaceholderResponseToEvaluate
 
-	parsed, interpolated, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), extendedVariables, true)
+	parsed, interpolated, tools, ok := c.evaluateShared(
+		key, context, defaultValue.AsLdValue(), queryVariables, interpolate)
 	if !ok {
 		return c.returnJudgeDefault(key, context, defaultValue)
 	}
@@ -479,7 +538,7 @@ func (c *Client) JudgeConfig(
 ) AIJudgeConfig {
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageJudgeConfig, context, 1, data)
-	return c.evaluateJudgeConfig(key, context, defaultValue, variables)
+	return c.evaluateJudgeConfig(key, context, defaultValue, variables, true)
 }
 
 // returnAgentDefault builds an AIAgentConfig from the provided default, wires a tracker factory,
@@ -512,15 +571,15 @@ func (c *Client) returnAgentDefault(
 	return cfg
 }
 
-// evaluateAgentConfig fetches, validates, and interpolates an agent config without emitting
-// any metric. AgentConfig emits its own metric before calling this.
-// graphKey is non-empty when called from a graph-node context; empty for standalone calls.
+// evaluateAgentConfig builds an agent config without emitting a usage event. graphKey is empty for
+// standalone calls. When interpolate is false, the instructions template is returned verbatim.
 func (c *Client) evaluateAgentConfig(
 	key string,
 	context ldcontext.Context,
 	defaultValue AIAgentConfigDefault,
 	variables map[string]interface{},
 	graphKey string,
+	interpolate bool,
 ) AIAgentConfig {
 	parsed, _, tools, ok := c.evaluateShared(key, context, defaultValue.AsLdValue(), variables, false)
 	if !ok {
@@ -533,11 +592,10 @@ func (c *Client) evaluateAgentConfig(
 		return c.returnAgentDefault(key, context, defaultValue, graphKey)
 	}
 
-	// Interpolate the instructions template using the same Mustache engine and merged
-	// variable map (ldctx + user vars) used for messages in evaluateShared. ldctx is always
-	// available regardless of whether the caller provided any user variables.
+	// When interpolate is true, run the instructions template through the Mustache engine using
+	// the same merged variable map (ldctx + user vars) used for messages in evaluateShared.
 	instructions := parsed.Instructions
-	if instructions != "" {
+	if interpolate && instructions != "" {
 		mergedVars := map[string]interface{}{ldContextVariable: getAllAttributes(context)}
 		for k, v := range variables {
 			if k != ldContextVariable {
@@ -587,7 +645,7 @@ func (c *Client) AgentConfig(
 ) AIAgentConfig {
 	data := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(key)).Build()
 	_ = c.sdk.TrackMetric(usageAgentConfig, context, 1, data)
-	return c.evaluateAgentConfig(key, context, defaultValue, variables, "")
+	return c.evaluateAgentConfig(key, context, defaultValue, variables, "", true)
 }
 
 // AgentConfigRequest pairs a flag key with its per-agent default and interpolation variables for
@@ -610,7 +668,7 @@ func (c *Client) AgentConfigs(
 	_ = c.sdk.TrackMetric(usageAgentConfigs, context, float64(count), ldvalue.Int(count))
 	result := make(map[string]AIAgentConfig, count)
 	for _, req := range requests {
-		result[req.Key] = c.evaluateAgentConfig(req.Key, context, req.DefaultValue, req.Variables, "")
+		result[req.Key] = c.evaluateAgentConfig(req.Key, context, req.DefaultValue, req.Variables, "", true)
 	}
 	return result
 }
@@ -666,7 +724,7 @@ func (c *Client) AgentGraph(
 	configs := make(map[string]AIAgentConfig, len(allKeys))
 	nodeDefault := NewAIAgentConfigDefault().Disabled()
 	for key := range allKeys {
-		cfg := c.evaluateAgentConfig(key, context, nodeDefault, variables, graphKey)
+		cfg := c.evaluateAgentConfig(key, context, nodeDefault, variables, graphKey, true)
 		if !cfg.Enabled() {
 			c.logConfigWarning(graphKey, "agent config %q in graph is not enabled or could not be fetched", key)
 			return disabled
