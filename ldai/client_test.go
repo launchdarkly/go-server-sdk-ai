@@ -283,7 +283,7 @@ func TestParseInvalidConfigReturnsDefault(t *testing.T) {
 
 			cfg := client.CompletionConfig("key", ldcontext.New("user"), def, nil)
 			// Verify config data matches the default
-			assert.Equal(t, def.AsLdValue(), cfg.AsLdValue())
+			assert.Equal(t, []datamodel.Message{{Role: datamodel.User, Content: "hello"}}, cfg.Messages())
 			// Verify CreateTracker() now works (returnDefault always injects a factory)
 			assert.NotNil(t, cfg.CreateTracker())
 
@@ -691,16 +691,16 @@ func TestInterpolation(t *testing.T) {
 
 func TestModeFromMetadata(t *testing.T) {
 	// Mode carried only in _ldMeta (no root-level "mode" key) must be returned by Mode().
-	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "mode": "agent"}}`)
+	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "mode": "completion"}}`)
 	client, err := NewClient(newMockSDK(raw, nil))
 	require.NoError(t, err)
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
-	assert.Equal(t, "agent", cfg.Mode())
+	assert.Equal(t, "completion", cfg.Mode())
 }
 
 func TestParseJudgeSpecificFields(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "completion"},
 		"evaluationMetricKey": "toxicity",
 		"judgeConfiguration": {
 			"judges": [
@@ -719,7 +719,7 @@ func TestParseJudgeSpecificFields(t *testing.T) {
 
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 
-	assert.Equal(t, "judge", cfg.Mode())
+	assert.Equal(t, "completion", cfg.Mode())
 	assert.Equal(t, "toxicity", cfg.EvaluationMetricKey())
 
 	judgeConfig := cfg.JudgeConfiguration()
@@ -733,7 +733,7 @@ func TestParseJudgeSpecificFields(t *testing.T) {
 
 func TestParseEvaluationMetricKeys(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "completion"},
 		"evaluationMetricKeys": ["relevance", "accuracy"],
 		"messages": [
 			{"content": "test", "role": "system"}
@@ -746,14 +746,14 @@ func TestParseEvaluationMetricKeys(t *testing.T) {
 
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 
-	assert.Equal(t, "judge", cfg.Mode())
+	assert.Equal(t, "completion", cfg.Mode())
 	assert.Equal(t, "", cfg.EvaluationMetricKey())
 	assert.Equal(t, []string{"relevance", "accuracy"}, cfg.EvaluationMetricKeys())
 }
 
 func TestParseEvaluationMetricKeyPriority(t *testing.T) {
 	json := []byte(`{
-		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "completion"},
 		"evaluationMetricKey": "toxicity",
 		"evaluationMetricKeys": ["relevance", "accuracy"],
 		"messages": [
@@ -767,7 +767,7 @@ func TestParseEvaluationMetricKeyPriority(t *testing.T) {
 
 	cfg := client.CompletionConfig("key", ldcontext.New("user"), Disabled(), nil)
 
-	assert.Equal(t, "judge", cfg.Mode())
+	assert.Equal(t, "completion", cfg.Mode())
 	// Both fields should be parsed
 	assert.Equal(t, "toxicity", cfg.EvaluationMetricKey())
 	assert.Equal(t, []string{"relevance", "accuracy"}, cfg.EvaluationMetricKeys())
@@ -1774,7 +1774,7 @@ func TestCompletionConfig_BadMessagesFallsBack(t *testing.T) {
 	def := NewAICompletionConfigDefault().WithMessage("Default message.", datamodel.User)
 	cfg := client.CompletionConfig("completion-key", ldcontext.New("user"), def, nil)
 
-	assert.Equal(t, def.AsLdValue(), cfg.AsLdValue(),
+	assert.Equal(t, []datamodel.Message{{Role: datamodel.User, Content: "Default message."}}, cfg.Messages(),
 		"malformed completion message must fall back to default")
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "malformed message at index")
 }

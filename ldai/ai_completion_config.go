@@ -14,12 +14,11 @@ import (
 // To send analytic events to LaunchDarkly, call CreateTracker to obtain a Tracker.
 type AICompletionConfig struct {
 	aiConfigBase
+	mode                 string
 	messages             []datamodel.Message
 	judgeConfiguration   *datamodel.JudgeConfiguration
 	evaluationMetricKey  string
 	evaluationMetricKeys []string
-	// raw is the underlying wire representation, kept for AsLdValue() marshaling.
-	raw datamodel.Config
 }
 
 // Messages returns the interpolated messages defined by the config. The series of messages
@@ -31,11 +30,6 @@ func (c *AICompletionConfig) Messages() []datamodel.Message {
 // JudgeConfiguration returns the judge configuration attached to this config, if any.
 func (c *AICompletionConfig) JudgeConfiguration() *datamodel.JudgeConfiguration {
 	return c.judgeConfiguration.Clone()
-}
-
-// AsLdValue is used internally.
-func (c *AICompletionConfig) AsLdValue() ldvalue.Value {
-	return ldvalue.FromJSONMarshal(c.raw)
 }
 
 // VariationKey is used internally by LaunchDarkly.
@@ -88,7 +82,7 @@ func (c *AICompletionConfig) CustomModelParam(key string) (ldvalue.Value, bool) 
 //
 // Deprecated: The config type itself indicates the mode.
 func (c *AICompletionConfig) Mode() string {
-	return c.raw.Meta.Mode
+	return c.mode
 }
 
 // EvaluationMetricKey returns the evaluation metric key for judge mode configs.
