@@ -1469,7 +1469,7 @@ func TestAgentConfig_GraphKeyPassthrough(t *testing.T) {
 	mockSDK.events = nil
 
 	ctx := ldcontext.New("user")
-	cfg := client.evaluateAgentConfig("agent-key", ctx, NewAIAgentConfigDefault(), nil, "my-graph")
+	cfg := client.evaluateAgentConfig("agent-key", ctx, NewAIAgentConfigDefault(), nil, "my-graph", true)
 
 	tracker := cfg.CreateTracker()
 	require.NotNil(t, tracker)
@@ -1797,4 +1797,312 @@ func TestJudgeConfig_BadMessagesFallsBack(t *testing.T) {
 	assert.Equal(t, "default-metric", cfg.EvaluationMetricKey(),
 		"malformed judge message must fall back to default")
 	mockSDK.log.AssertMessageMatch(t, true, ldlog.Warn, "malformed message at index")
+}
+
+// ---- *ConfigTemplate tests ----
+
+// TestCompletionConfigTemplate_PlaceholdersPreserved verifies that Mustache placeholders in
+// message content are returned verbatim without being resolved or replaced with empty strings.
+func TestCompletionConfigTemplate_PlaceholdersPreserved(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"messages": [
+			{"content": "Hello {{name}}, your role is {{role}}.", "role": "user"},
+			{"content": "Static message.", "role": "system"}
+		]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	def := NewAICompletionConfigDefault()
+	cfg := client.CompletionConfigTemplate("key", ldcontext.New("user"), def)
+
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "Hello {{name}}, your role is {{role}}.", msgs[0].Content,
+		"placeholders must be returned verbatim, not resolved or emptied")
+	assert.Equal(t, "Static message.", msgs[1].Content)
+}
+
+// TestCompletionConfigTemplate_UsageEvent verifies that CompletionConfigTemplate emits the
+// template-specific usage event, not the non-template event.
+func TestCompletionConfigTemplate_UsageEvent(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true},
+		"messages": [{"content": "Hello {{name}}.", "role": "user"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	ctx := ldcontext.New("user-key")
+	configKey := "completion-template-key"
+	client.CompletionConfigTemplate(configKey, ctx, NewAICompletionConfigDefault())
+
+	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
+	require.Len(t, mockSDK.events, 1)
+	evt := mockSDK.events[0]
+	assert.Equal(t, "$ld:ai:usage:completion-config-template", evt.eventName)
+	assert.Equal(t, ctx, evt.context)
+	assert.Equal(t, float64(1), evt.metricValue)
+	assert.Equal(t, expectedData, evt.data)
+}
+
+// TestCompletionConfigTemplate_DefaultPath verifies that the error/offline path returns the
+// provided default Config with a working CreateTracker.
+func TestCompletionConfigTemplate_DefaultPath(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAICompletionConfigDefault().
+		WithModelName("fallback-model").
+		WithMessage("{{raw}} template", datamodel.User)
+
+	cfg := client.CompletionConfigTemplate("key", ldcontext.New("user"), def)
+
+	assert.Equal(t, "fallback-model", cfg.ModelName())
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "{{raw}} template", msgs[0].Content, "default messages must not be interpolated")
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
+// TestCompletionConfigTemplate_TrackerFactory verifies that the config returned by
+// CompletionConfigTemplate has a working CreateTracker.
+func TestCompletionConfigTemplate_TrackerFactory(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "tmpl-var", "enabled": true, "version": 3},
+		"messages": [{"content": "Hello {{name}}.", "role": "user"}]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.CompletionConfigTemplate("key", ldcontext.New("user"), NewAICompletionConfigDefault())
+	assert.NotNil(t, cfg.CreateTracker())
+	assert.Equal(t, "tmpl-var", cfg.VariationKey())
+	assert.Equal(t, 3, cfg.Version())
+}
+
+// TestAgentConfigTemplate_PlaceholdersPreserved verifies that Mustache placeholders in
+// instructions are returned verbatim without interpolation.
+func TestAgentConfigTemplate_PlaceholdersPreserved(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Hello {{name}}, assist {{role}} users via {{ldctx.key}}."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfigTemplate("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault())
+
+	assert.Equal(t, "Hello {{name}}, assist {{role}} users via {{ldctx.key}}.", cfg.Instructions(),
+		"placeholders must be returned verbatim, not resolved or emptied")
+}
+
+// TestAgentConfigTemplate_UsageEvent verifies that AgentConfigTemplate emits the template-specific
+// usage event, not the non-template event.
+func TestAgentConfigTemplate_UsageEvent(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+		"instructions": "Hello {{name}}."
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	ctx := ldcontext.New("user-key")
+	configKey := "agent-template-key"
+	client.AgentConfigTemplate(configKey, ctx, NewAIAgentConfigDefault())
+
+	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
+	require.Len(t, mockSDK.events, 1)
+	evt := mockSDK.events[0]
+	assert.Equal(t, "$ld:ai:usage:agent-config-template", evt.eventName)
+	assert.Equal(t, ctx, evt.context)
+	assert.Equal(t, float64(1), evt.metricValue)
+	assert.Equal(t, expectedData, evt.data)
+}
+
+// TestAgentConfigTemplate_DefaultPath verifies that the error/offline path returns the provided
+// AIAgentConfigDefault with a working CreateTracker.
+func TestAgentConfigTemplate_DefaultPath(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIAgentConfigDefault().
+		WithModelName("fallback-model").
+		WithInstructions("{{raw}} instructions")
+
+	cfg := client.AgentConfigTemplate("agent-key", ldcontext.New("user"), def)
+
+	assert.Equal(t, "fallback-model", cfg.Model().Name)
+	assert.Equal(t, "{{raw}} instructions", cfg.Instructions(),
+		"default instructions must not be interpolated")
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
+// TestAgentConfigTemplate_TrackerFactory verifies that the config returned by
+// AgentConfigTemplate has a working CreateTracker.
+func TestAgentConfigTemplate_TrackerFactory(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "tmpl-var", "enabled": true, "mode": "agent", "version": 5},
+		"instructions": "Hello {{name}}."
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.AgentConfigTemplate("agent-key", ldcontext.New("user"), NewAIAgentConfigDefault())
+	assert.NotNil(t, cfg.CreateTracker())
+	assert.Equal(t, "tmpl-var", cfg.variationKey)
+	assert.Equal(t, 5, cfg.version)
+}
+
+// TestJudgeConfigTemplate_PlaceholdersPreserved verifies that Mustache placeholders in judge
+// messages are returned verbatim, and that the reserved judge placeholders are NOT injected when
+// interpolation is skipped.
+func TestJudgeConfigTemplate_PlaceholdersPreserved(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"evaluationMetricKey": "toxicity",
+		"messages": [
+			{"content": "Context: {{context}}. Evaluate below.", "role": "system"},
+			{"content": "Response: {{response_to_evaluate}}", "role": "user"}
+		]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfigTemplate("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault())
+
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "Context: {{context}}. Evaluate below.", msgs[0].Content,
+		"custom placeholders must be returned verbatim")
+	assert.Equal(t, "Response: {{response_to_evaluate}}", msgs[1].Content,
+		"reserved judge placeholder must be returned verbatim, not injected by the SDK")
+}
+
+// TestJudgeConfigTemplate_UsageEvent verifies that JudgeConfigTemplate emits the template-specific
+// usage event, not the non-template event.
+func TestJudgeConfigTemplate_UsageEvent(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+		"evaluationMetricKey": "toxicity",
+		"messages": [{"content": "Evaluate: {{response_to_evaluate}}", "role": "system"}]
+	}`)
+	mockSDK := newMockSDK(raw, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	ctx := ldcontext.New("user-key")
+	configKey := "judge-template-key"
+	client.JudgeConfigTemplate(configKey, ctx, NewAIJudgeConfigDefault())
+
+	expectedData := ldvalue.ObjectBuild().Set("configKey", ldvalue.String(configKey)).Build()
+	require.Len(t, mockSDK.events, 1)
+	evt := mockSDK.events[0]
+	assert.Equal(t, "$ld:ai:usage:judge-config-template", evt.eventName)
+	assert.Equal(t, ctx, evt.context)
+	assert.Equal(t, float64(1), evt.metricValue)
+	assert.Equal(t, expectedData, evt.data)
+}
+
+// TestJudgeConfigTemplate_DefaultPath verifies that the error/offline path returns the provided
+// AIJudgeConfigDefault with a working CreateTracker.
+func TestJudgeConfigTemplate_DefaultPath(t *testing.T) {
+	mockSDK := newMockSDK(nil, fmt.Errorf("offline"))
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+
+	def := NewAIJudgeConfigDefault().
+		WithEvaluationMetricKey("accuracy").
+		WithMessage("Evaluate {{response_to_evaluate}}", datamodel.System)
+
+	cfg := client.JudgeConfigTemplate("judge-key", ldcontext.New("user"), def)
+
+	assert.Equal(t, "accuracy", cfg.EvaluationMetricKey())
+	msgs := cfg.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "Evaluate {{response_to_evaluate}}", msgs[0].Content,
+		"default messages must not be interpolated")
+	assert.NotNil(t, cfg.CreateTracker())
+}
+
+// TestJudgeConfigTemplate_TrackerFactory verifies that the config returned by
+// JudgeConfigTemplate has a working CreateTracker.
+func TestJudgeConfigTemplate_TrackerFactory(t *testing.T) {
+	raw := []byte(`{
+		"_ldMeta": {"variationKey": "tmpl-var", "enabled": true, "mode": "judge", "version": 4},
+		"evaluationMetricKey": "toxicity",
+		"messages": [{"content": "Evaluate {{response_to_evaluate}}", "role": "system"}]
+	}`)
+	client, err := NewClient(newMockSDK(raw, nil))
+	require.NoError(t, err)
+
+	cfg := client.JudgeConfigTemplate("judge-key", ldcontext.New("user"), NewAIJudgeConfigDefault())
+	assert.NotNil(t, cfg.CreateTracker())
+	assert.Equal(t, "tmpl-var", cfg.variationKey)
+	assert.Equal(t, 4, cfg.version)
+}
+
+// TestNonTemplateMethods_StillInterpolate is a regression guard verifying that the non-template
+// methods (CompletionConfig, AgentConfig, JudgeConfig) continue to interpolate as before.
+func TestNonTemplateMethods_StillInterpolate(t *testing.T) {
+	t.Run("CompletionConfig interpolates", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true},
+			"messages": [{"content": "Hello {{name}}.", "role": "user"}]
+		}`)
+		client, err := NewClient(newMockSDK(raw, nil))
+		require.NoError(t, err)
+
+		cfg := client.CompletionConfig("key", ldcontext.New("user"), NewAICompletionConfigDefault(),
+			map[string]interface{}{"name": "Alice"})
+
+		require.Len(t, cfg.Messages(), 1)
+		assert.Equal(t, "Hello Alice.", cfg.Messages()[0].Content)
+	})
+
+	t.Run("AgentConfig interpolates", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "agent"},
+			"instructions": "Hello {{name}}."
+		}`)
+		client, err := NewClient(newMockSDK(raw, nil))
+		require.NoError(t, err)
+
+		cfg := client.AgentConfig("key", ldcontext.New("user"), NewAIAgentConfigDefault(),
+			map[string]interface{}{"name": "Bob"})
+
+		assert.Equal(t, "Hello Bob.", cfg.Instructions())
+	})
+
+	t.Run("JudgeConfig interpolates and injects reserved placeholders", func(t *testing.T) {
+		raw := []byte(`{
+			"_ldMeta": {"variationKey": "1", "enabled": true, "mode": "judge"},
+			"evaluationMetricKey": "toxicity",
+			"messages": [
+				{"content": "Context: {{context}}.", "role": "system"},
+				{"content": "{{message_history}} {{response_to_evaluate}}", "role": "user"}
+			]
+		}`)
+		client, err := NewClient(newMockSDK(raw, nil))
+		require.NoError(t, err)
+
+		cfg := client.JudgeConfig("key", ldcontext.New("user"), NewAIJudgeConfigDefault(),
+			map[string]interface{}{"context": "test context"})
+
+		msgs := cfg.Messages()
+		require.Len(t, msgs, 2)
+		assert.Equal(t, "Context: test context.", msgs[0].Content)
+		assert.Contains(t, msgs[1].Content, JudgePlaceholderMessageHistory,
+			"JudgeConfig must inject the reserved message_history placeholder")
+		assert.Contains(t, msgs[1].Content, JudgePlaceholderResponseToEvaluate,
+			"JudgeConfig must inject the reserved response_to_evaluate placeholder")
+	})
 }
