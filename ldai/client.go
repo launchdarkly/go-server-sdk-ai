@@ -732,10 +732,12 @@ func (c *Client) AgentGraph(
 		configs[key] = cfg
 	}
 
+	nodes, nodeKeys := buildGraphNodes(parsed, configs)
 	return AgentGraphDefinition{
 		enabled:      true,
 		flagValue:    parsed,
-		nodes:        buildGraphNodes(parsed, configs),
+		nodes:        nodes,
+		nodeKeys:     nodeKeys,
 		graphKey:     graphKey,
 		variationKey: parsed.variationKey,
 		version:      parsed.version,

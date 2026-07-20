@@ -1,13 +1,8 @@
 package ldai
 
 import (
-	"sort"
-
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 )
-
-// maxTraversalDepth bounds the number of level-walk iterations during depth assignment.
-const maxTraversalDepth = 100
 
 // GraphEdge is a directed edge from a source node to a target node in an agent graph.
 // The source is implicit — it is the node that owns this edge.
@@ -56,6 +51,7 @@ type AgentGraphDefinition struct {
 	enabled      bool
 	flagValue    graphFlagValue
 	nodes        map[string]*AgentGraphNode
+	nodeKeys     []string // encounter order: root first, then BFS via edges
 	graphKey     string
 	variationKey string
 	version      int
@@ -96,13 +92,17 @@ func (d *AgentGraphDefinition) GetChildNodes(nodeKey string) []*AgentGraphNode {
 	return children
 }
 
-// GetParentNodes returns nodes with an outgoing edge to nodeKey, sorted by key.
+// GetParentNodes returns nodes with an outgoing edge to nodeKey, in graph encounter order.
 func (d *AgentGraphDefinition) GetParentNodes(nodeKey string) []*AgentGraphNode {
 	if d == nil {
 		return nil
 	}
 	var parents []*AgentGraphNode
-	for _, node := range d.nodes {
+	for _, key := range d.nodeKeys {
+		node := d.nodes[key]
+		if node == nil {
+			continue
+		}
 		for _, edge := range node.edges {
 			if edge.key == nodeKey {
 				parents = append(parents, node)
@@ -110,22 +110,21 @@ func (d *AgentGraphDefinition) GetParentNodes(nodeKey string) []*AgentGraphNode 
 			}
 		}
 	}
-	sort.Slice(parents, func(i, j int) bool { return parents[i].key < parents[j].key })
 	return parents
 }
 
-// TerminalNodes returns nodes with no outgoing edges, sorted by key.
+// TerminalNodes returns nodes with no outgoing edges, in graph encounter order.
 func (d *AgentGraphDefinition) TerminalNodes() []*AgentGraphNode {
 	if d == nil {
 		return nil
 	}
 	var terminals []*AgentGraphNode
-	for _, node := range d.nodes {
-		if node.IsTerminal() {
+	for _, key := range d.nodeKeys {
+		node := d.nodes[key]
+		if node != nil && node.IsTerminal() {
 			terminals = append(terminals, node)
 		}
 	}
-	sort.Slice(terminals, func(i, j int) bool { return terminals[i].key < terminals[j].key })
 	return terminals
 }
 
@@ -133,9 +132,8 @@ func (d *AgentGraphDefinition) TerminalNodes() []*AgentGraphNode {
 // context map under the node's key for use by subsequently visited nodes.
 type TraverseFunc func(node *AgentGraphNode, context map[string]interface{}) interface{}
 
-// Traverse visits nodes in longest-path depth order from the root (shallow before deep).
-// Within a depth, nodes are visited in sorted key order. Each node is visited at most once.
-// No-op when the graph has no root or fn is nil.
+// Traverse performs a breadth-first traversal starting from the root. Each node is visited
+// at most once. No-op when the graph has no root or fn is nil.
 func (d *AgentGraphDefinition) Traverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
 	if root == nil || fn == nil {
@@ -147,11 +145,26 @@ func (d *AgentGraphDefinition) Traverse(fn TraverseFunc, initialContext map[stri
 		ctx = make(map[string]interface{})
 	}
 
-	d.executeByDepth(fn, ctx, true)
+	visited := map[string]struct{}{root.key: {}}
+	queue := []*AgentGraphNode{root}
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+
+		ctx[node.key] = fn(node, ctx)
+
+		for _, child := range d.GetChildNodes(node.key) {
+			if _, seen := visited[child.key]; !seen {
+				visited[child.key] = struct{}{}
+				queue = append(queue, child)
+			}
+		}
+	}
 }
 
-// ReverseTraverse visits nodes deepest-first (root last), using longest-path depth order.
-// Within a depth, nodes are visited in sorted key order. No-op when there is no root, fn is
+// ReverseTraverse visits nodes via BFS from terminal nodes toward the root (root last).
+// Within a level, order follows graph encounter order. No-op when there is no root, fn is
 // nil, or there are no terminals (e.g. a pure cycle).
 func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
@@ -169,86 +182,38 @@ func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext m
 		ctx = make(map[string]interface{})
 	}
 
-	d.executeByDepth(fn, ctx, false)
-}
+	visited := make(map[string]struct{})
+	var queue []*AgentGraphNode
 
-// assignLongestPathDepths returns longest-path depth from the root for each reachable node.
-func (d *AgentGraphDefinition) assignLongestPathDepths() map[string]int {
-	root := d.RootNode()
-	if root == nil {
-		return nil
-	}
-
-	depths := map[string]int{root.key: 0}
-	seen := map[string]struct{}{root.key: struct{}{}}
-	frontier := []string{root.key}
-	maxDepth := 0
-
-	for iterations := 0; len(frontier) > 0 && iterations < maxTraversalDepth; iterations++ {
-		next := make([]string, 0)
-		for _, nodeKey := range frontier {
-			depth := depths[nodeKey]
-			for _, child := range d.GetChildNodes(nodeKey) {
-				childDepth := depth + 1
-				existing, ok := depths[child.key]
-				if ok && childDepth > existing && existing < depth {
-					continue // cycle back-edge
-				}
-				if !ok || childDepth > existing {
-					depths[child.key] = childDepth
-					if childDepth > maxDepth {
-						maxDepth = childDepth
-					}
-				}
-				if _, already := seen[child.key]; !already {
-					seen[child.key] = struct{}{}
-					next = append(next, child.key)
-				}
-			}
+	for _, terminal := range terminals {
+		if terminal.key == root.key {
+			continue
 		}
-		frontier = next
-	}
-
-	for key := range seen {
-		if _, ok := depths[key]; !ok {
-			depths[key] = maxDepth
+		if _, seen := visited[terminal.key]; !seen {
+			visited[terminal.key] = struct{}{}
+			queue = append(queue, terminal)
 		}
 	}
-	return depths
-}
 
-// executeByDepth invokes fn by depth (ascending or descending), sorting keys within each depth.
-func (d *AgentGraphDefinition) executeByDepth(fn TraverseFunc, ctx map[string]interface{}, ascending bool) {
-	depths := d.assignLongestPathDepths()
-	if len(depths) == 0 {
-		return
-	}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
 
-	byDepth := make(map[int][]string)
-	for key, depth := range depths {
-		byDepth[depth] = append(byDepth[depth], key)
-	}
+		ctx[node.key] = fn(node, ctx)
 
-	levels := make([]int, 0, len(byDepth))
-	for depth := range byDepth {
-		levels = append(levels, depth)
-	}
-	if ascending {
-		sort.Ints(levels)
-	} else {
-		sort.Sort(sort.Reverse(sort.IntSlice(levels)))
-	}
-
-	for _, depth := range levels {
-		keys := byDepth[depth]
-		sort.Strings(keys)
-		for _, key := range keys {
-			node := d.nodes[key]
-			if node == nil {
+		for _, parent := range d.GetParentNodes(node.key) {
+			if parent.key == root.key {
 				continue
 			}
-			ctx[key] = fn(node, ctx)
+			if _, seen := visited[parent.key]; !seen {
+				visited[parent.key] = struct{}{}
+				queue = append(queue, parent)
+			}
 		}
+	}
+
+	if _, seen := visited[root.key]; !seen {
+		ctx[root.key] = fn(root, ctx)
 	}
 }
 
@@ -288,10 +253,62 @@ func collectReachableKeys(flagValue graphFlagValue) map[string]struct{} {
 	return visited
 }
 
-func buildGraphNodes(flagValue graphFlagValue, configs map[string]AIAgentConfig) map[string]*AgentGraphNode {
-	allKeys := collectAllKeys(flagValue)
-	nodes := make(map[string]*AgentGraphNode, len(allKeys))
+// orderedNodeKeys returns keys in encounter order: root first, then BFS via edge slices,
+// then any remaining keys from allKeys (for incomplete fixtures).
+func orderedNodeKeys(flagValue graphFlagValue, allKeys map[string]struct{}) []string {
+	ordered := make([]string, 0, len(allKeys))
+	seen := make(map[string]struct{}, len(allKeys))
+
+	appendKey := func(key string) {
+		if key == "" {
+			return
+		}
+		if _, ok := allKeys[key]; !ok {
+			return
+		}
+		if _, already := seen[key]; already {
+			return
+		}
+		seen[key] = struct{}{}
+		ordered = append(ordered, key)
+	}
+
+	if flagValue.root != "" {
+		appendKey(flagValue.root)
+		queue := []string{flagValue.root}
+		for len(queue) > 0 {
+			key := queue[0]
+			queue = queue[1:]
+			for _, edge := range flagValue.edges[key] {
+				if edge.key == "" {
+					continue
+				}
+				if _, already := seen[edge.key]; already {
+					continue
+				}
+				if _, ok := allKeys[edge.key]; !ok {
+					continue
+				}
+				appendKey(edge.key)
+				queue = append(queue, edge.key)
+			}
+		}
+	}
+
 	for key := range allKeys {
+		appendKey(key)
+	}
+	return ordered
+}
+
+func buildGraphNodes(
+	flagValue graphFlagValue,
+	configs map[string]AIAgentConfig,
+) (map[string]*AgentGraphNode, []string) {
+	allKeys := collectAllKeys(flagValue)
+	nodeKeys := orderedNodeKeys(flagValue, allKeys)
+	nodes := make(map[string]*AgentGraphNode, len(allKeys))
+	for _, key := range nodeKeys {
 		config, ok := configs[key]
 		if !ok {
 			continue
@@ -312,7 +329,17 @@ func buildGraphNodes(flagValue graphFlagValue, configs map[string]AIAgentConfig)
 			edges:  edges,
 		}
 	}
-	return nodes
+	// Keep nodeKeys only for nodes that were actually built.
+	if len(nodes) != len(nodeKeys) {
+		filtered := make([]string, 0, len(nodes))
+		for _, key := range nodeKeys {
+			if _, ok := nodes[key]; ok {
+				filtered = append(filtered, key)
+			}
+		}
+		nodeKeys = filtered
+	}
+	return nodes, nodeKeys
 }
 
 func newDisabledAgentGraphDefinition(flagValue graphFlagValue, graphKey string) AgentGraphDefinition {
@@ -320,6 +347,7 @@ func newDisabledAgentGraphDefinition(flagValue graphFlagValue, graphKey string) 
 		enabled:      false,
 		flagValue:    flagValue,
 		nodes:        map[string]*AgentGraphNode{},
+		nodeKeys:     nil,
 		graphKey:     graphKey,
 		variationKey: flagValue.variationKey,
 		version:      flagValue.version,
