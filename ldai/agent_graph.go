@@ -1,8 +1,13 @@
 package ldai
 
 import (
+	"sort"
+
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 )
+
+// maxTraversalDepth bounds the number of level-walk iterations during depth assignment.
+const maxTraversalDepth = 100
 
 // GraphEdge is a directed edge from a source node to a target node in an agent graph.
 // The source is implicit — it is the node that owns this edge.
@@ -91,7 +96,7 @@ func (d *AgentGraphDefinition) GetChildNodes(nodeKey string) []*AgentGraphNode {
 	return children
 }
 
-// GetParentNodes returns all nodes that have an outgoing edge pointing to nodeKey.
+// GetParentNodes returns nodes with an outgoing edge to nodeKey, sorted by key.
 func (d *AgentGraphDefinition) GetParentNodes(nodeKey string) []*AgentGraphNode {
 	if d == nil {
 		return nil
@@ -105,10 +110,11 @@ func (d *AgentGraphDefinition) GetParentNodes(nodeKey string) []*AgentGraphNode 
 			}
 		}
 	}
+	sort.Slice(parents, func(i, j int) bool { return parents[i].key < parents[j].key })
 	return parents
 }
 
-// TerminalNodes returns all nodes with no outgoing edges.
+// TerminalNodes returns nodes with no outgoing edges, sorted by key.
 func (d *AgentGraphDefinition) TerminalNodes() []*AgentGraphNode {
 	if d == nil {
 		return nil
@@ -119,6 +125,7 @@ func (d *AgentGraphDefinition) TerminalNodes() []*AgentGraphNode {
 			terminals = append(terminals, node)
 		}
 	}
+	sort.Slice(terminals, func(i, j int) bool { return terminals[i].key < terminals[j].key })
 	return terminals
 }
 
@@ -126,11 +133,9 @@ func (d *AgentGraphDefinition) TerminalNodes() []*AgentGraphNode {
 // context map under the node's key for use by subsequently visited nodes.
 type TraverseFunc func(node *AgentGraphNode, context map[string]interface{}) interface{}
 
-// Traverse performs a breadth-first traversal starting from the root. Each node is visited
-// at most once (cycle-safe). This is a no-op when the graph is disabled or has no root.
-//
-// If initialContext is nil, a new map is created. The visitor's return value is stored under
-// the node key in the context map.
+// Traverse visits nodes in longest-path depth order from the root (shallow before deep).
+// Within a depth, nodes are visited in sorted key order. Each node is visited at most once.
+// No-op when the graph has no root or fn is nil.
 func (d *AgentGraphDefinition) Traverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
 	if root == nil || fn == nil {
@@ -142,33 +147,20 @@ func (d *AgentGraphDefinition) Traverse(fn TraverseFunc, initialContext map[stri
 		ctx = make(map[string]interface{})
 	}
 
-	visited := make(map[string]struct{})
-	queue := []*AgentGraphNode{root}
-	visited[root.key] = struct{}{}
-
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
-
-		result := fn(node, ctx)
-		ctx[node.key] = result
-
-		for _, child := range d.GetChildNodes(node.key) {
-			if _, seen := visited[child.key]; !seen {
-				visited[child.key] = struct{}{}
-				queue = append(queue, child)
-			}
-		}
-	}
+	d.executeByDepth(fn, ctx, true)
 }
 
-// ReverseTraverse performs a reverse breadth-first traversal starting from terminal nodes
-// and working toward the root. The root node is processed last when the graph has at least
-// one terminal. Each node is visited at most once (cycle-safe). This is a no-op when the
-// graph is disabled, has no root, or has no terminal nodes (for example a pure cycle).
+// ReverseTraverse visits nodes deepest-first (root last), using longest-path depth order.
+// Within a depth, nodes are visited in sorted key order. No-op when there is no root, fn is
+// nil, or there are no terminals (e.g. a pure cycle).
 func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
 	if root == nil || fn == nil {
+		return
+	}
+
+	terminals := d.TerminalNodes()
+	if len(terminals) == 0 {
 		return
 	}
 
@@ -177,45 +169,85 @@ func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext m
 		ctx = make(map[string]interface{})
 	}
 
-	terminals := d.TerminalNodes()
-	visited := make(map[string]struct{})
-	var queue []*AgentGraphNode
+	d.executeByDepth(fn, ctx, false)
+}
 
-	// Seed from terminals, excluding root (it is processed last).
-	for _, terminal := range terminals {
-		if terminal.key == root.key {
-			continue
-		}
-		if _, seen := visited[terminal.key]; !seen {
-			visited[terminal.key] = struct{}{}
-			queue = append(queue, terminal)
-		}
+// assignLongestPathDepths returns longest-path depth from the root for each reachable node.
+func (d *AgentGraphDefinition) assignLongestPathDepths() map[string]int {
+	root := d.RootNode()
+	if root == nil {
+		return nil
 	}
 
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
+	depths := map[string]int{root.key: 0}
+	seen := map[string]struct{}{root.key: struct{}{}}
+	frontier := []string{root.key}
+	maxDepth := 0
 
-		result := fn(node, ctx)
-		ctx[node.key] = result
+	for iterations := 0; len(frontier) > 0 && iterations < maxTraversalDepth; iterations++ {
+		next := make([]string, 0)
+		for _, nodeKey := range frontier {
+			depth := depths[nodeKey]
+			for _, child := range d.GetChildNodes(nodeKey) {
+				childDepth := depth + 1
+				existing, ok := depths[child.key]
+				if ok && childDepth > existing && existing < depth {
+					continue // cycle back-edge
+				}
+				if !ok || childDepth > existing {
+					depths[child.key] = childDepth
+					if childDepth > maxDepth {
+						maxDepth = childDepth
+					}
+				}
+				if _, already := seen[child.key]; !already {
+					seen[child.key] = struct{}{}
+					next = append(next, child.key)
+				}
+			}
+		}
+		frontier = next
+	}
 
-		for _, parent := range d.GetParentNodes(node.key) {
-			if parent.key == root.key {
+	for key := range seen {
+		if _, ok := depths[key]; !ok {
+			depths[key] = maxDepth
+		}
+	}
+	return depths
+}
+
+// executeByDepth invokes fn by depth (ascending or descending), sorting keys within each depth.
+func (d *AgentGraphDefinition) executeByDepth(fn TraverseFunc, ctx map[string]interface{}, ascending bool) {
+	depths := d.assignLongestPathDepths()
+	if len(depths) == 0 {
+		return
+	}
+
+	byDepth := make(map[int][]string)
+	for key, depth := range depths {
+		byDepth[depth] = append(byDepth[depth], key)
+	}
+
+	levels := make([]int, 0, len(byDepth))
+	for depth := range byDepth {
+		levels = append(levels, depth)
+	}
+	if ascending {
+		sort.Ints(levels)
+	} else {
+		sort.Sort(sort.Reverse(sort.IntSlice(levels)))
+	}
+
+	for _, depth := range levels {
+		keys := byDepth[depth]
+		sort.Strings(keys)
+		for _, key := range keys {
+			node := d.nodes[key]
+			if node == nil {
 				continue
 			}
-			if _, seen := visited[parent.key]; !seen {
-				visited[parent.key] = struct{}{}
-				queue = append(queue, parent)
-			}
-		}
-	}
-
-	// Process root last only when reverse traversal had a terminal to start from.
-	// A graph with no terminal nodes (for example a pure cycle) is a no-op.
-	if len(terminals) > 0 {
-		if _, seen := visited[root.key]; !seen {
-			result := fn(root, ctx)
-			ctx[root.key] = result
+			ctx[key] = fn(node, ctx)
 		}
 	}
 }
