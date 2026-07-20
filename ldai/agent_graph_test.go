@@ -459,7 +459,7 @@ func TestAgentGraphClient(t *testing.T) {
 		assert.True(t, found)
 	})
 
-	t.Run("blank graphKey returns disabled without usage event", func(t *testing.T) {
+	t.Run("blank graphKey emits usage and returns disabled", func(t *testing.T) {
 		sdk := newMultiFlagMockSDK(nil)
 		client, err := NewClient(sdk)
 		require.NoError(t, err)
@@ -469,9 +469,15 @@ func TestAgentGraphClient(t *testing.T) {
 		assert.False(t, graph.Enabled())
 		assert.Nil(t, graph.RootNode())
 
+		var graphUsage int
 		for _, e := range sdk.events[before:] {
-			assert.NotEqual(t, usageAgentGraph, e.eventName)
+			if e.eventName == usageAgentGraph {
+				graphUsage++
+				assert.Equal(t, float64(1), e.metricValue)
+				assert.Equal(t, "  ", e.data.StringValue())
+			}
 		}
+		assert.Equal(t, 1, graphUsage)
 	})
 
 	validationCases := []struct {

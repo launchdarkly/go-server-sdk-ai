@@ -686,11 +686,6 @@ func (c *Client) AgentGraph(
 	context ldcontext.Context,
 	variables map[string]interface{},
 ) AgentGraphDefinition {
-	if strings.TrimSpace(graphKey) == "" {
-		c.logger.Warnf("AI Client: agent graph key must not be blank")
-		return newDisabledAgentGraphDefinition(disabledGraphFlagValue(), graphKey)
-	}
-
 	_ = c.sdk.TrackMetric(usageAgentGraph, context, 1, ldvalue.String(graphKey))
 
 	defaultFlagValue := ldvalue.ObjectBuild().Set("root", ldvalue.String("")).Build()
