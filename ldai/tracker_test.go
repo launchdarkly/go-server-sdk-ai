@@ -170,14 +170,15 @@ func TestTracker_TrackRequest(t *testing.T) {
 func TestTracker_TrackRequestReceivesConfig(t *testing.T) {
 	events := newMockEvents()
 
-	expectedConfig := NewConfig().
-		WithMessage("hello", datamodel.Assistant).
-		WithModelName("model").
-		WithProviderName("provider").
-		WithModelParam("param", ldvalue.String("value")).
-		WithCustomModelParam("custom", ldvalue.String("value")).
-		Enable().
-		Build()
+	expectedConfig := AICompletionConfig{
+		aiConfigBase: aiConfigBase{
+			enabled:  true,
+			version:  defaultVersion(nil),
+			model:    ModelConfig{Name: "model", Parameters: map[string]ldvalue.Value{"param": ldvalue.String("value")}, Custom: map[string]ldvalue.Value{"custom": ldvalue.String("value")}},
+			provider: ProviderConfig{Name: "provider"},
+		},
+		messages: []datamodel.Message{{Content: "hello", Role: datamodel.Assistant}},
+	}
 
 	tracker := newTracker(events, newRunID(), "key", "variationKey", 4, ldcontext.New("key"), &expectedConfig, nil, "")
 
@@ -662,7 +663,7 @@ func TestTracker_ResumptionToken(t *testing.T) {
 
 	t.Run("does not include modelName or providerName", func(t *testing.T) {
 		events := newMockEvents()
-		config := NewConfig().WithModelName("gpt-4").WithProviderName("openai").Build()
+		config := AICompletionConfig{aiConfigBase: aiConfigBase{model: ModelConfig{Name: "gpt-4"}, provider: ProviderConfig{Name: "openai"}}}
 		tracker := newTracker(events, newRunID(), "key", "var", 1, ldcontext.New("key"), &config, nil, "")
 
 		token := tracker.ResumptionToken()
@@ -881,7 +882,7 @@ func TestTracker_GetSummary_ResumptionToken(t *testing.T) {
 func TestTracker_GetTrackData(t *testing.T) {
 	t.Run("all fields populated from constructor args", func(t *testing.T) {
 		events := newMockEvents()
-		config := NewConfig().WithModelName("gpt-4").WithProviderName("openai").Build()
+		config := AICompletionConfig{aiConfigBase: aiConfigBase{model: ModelConfig{Name: "gpt-4"}, provider: ProviderConfig{Name: "openai"}}}
 		tracker := newTracker(events, "fixed-run-id", "my-config", "var-1", 3, ldcontext.New("key"), &config, nil, "my-graph")
 
 		td := tracker.GetTrackData()
@@ -912,7 +913,7 @@ func TestTracker_GetTrackData(t *testing.T) {
 func TestExplicitVersionZeroInResumptionToken(t *testing.T) {
 	// A tracker with version 0 must encode and decode 0, not 1.
 	events := newMockEvents()
-	config := NewConfig().Build()
+	config := AICompletionConfig{}
 	tracker := newTracker(events, newRunID(), "key", "var", 0, ldcontext.New("user"), &config, nil, "")
 
 	token := tracker.ResumptionToken()

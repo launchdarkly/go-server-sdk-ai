@@ -291,7 +291,7 @@ func TrackerFromResumptionToken(token string, sdk ServerSDK, context ldcontext.C
 		return nil, fmt.Errorf("invalid resumption token: %w", err)
 	}
 
-	emptyConfig := Disabled()
+	emptyConfig := AICompletionConfig{}
 	return newTracker(
 		sdk,
 		payload.RunID,
