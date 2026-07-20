@@ -130,18 +130,6 @@ func (c *Client) returnDefault(
 	context ldcontext.Context,
 	def AICompletionConfigDefault,
 ) AICompletionConfig {
-	raw := datamodel.Config{
-		Messages: slices.Clone(def.messages),
-		Meta:     datamodel.Meta{Enabled: def.enabled},
-		Model: datamodel.Model{
-			Name:       def.modelName,
-			Parameters: maps.Clone(def.modelParams),
-			Custom:     maps.Clone(def.modelCustom),
-		},
-		Provider:           datamodel.Provider{Name: def.providerName},
-		Tools:              maps.Clone(def.tools),
-		JudgeConfiguration: def.judgeConfiguration.Clone(),
-	}
 	cfg := AICompletionConfig{
 		aiConfigBase: aiConfigBase{
 			key:     key,
@@ -153,11 +141,11 @@ func (c *Client) returnDefault(
 				Custom:     maps.Clone(def.modelCustom),
 			},
 			provider: ProviderConfig{Name: def.providerName},
-			tools:    c.resolveTools(key, ldvalue.FromJSONMarshal(raw)),
+			tools:    c.resolveTools(key, def.AsLdValue()),
 		},
+		mode:               "",
 		messages:           slices.Clone(def.messages),
 		judgeConfiguration: def.judgeConfiguration.Clone(),
-		raw:                raw,
 	}
 	cfg.trackerFactory = func() *Tracker {
 		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger, "")
@@ -240,11 +228,6 @@ func (c *Client) evaluateConfig(
 		return c.returnDefault(key, context, defaultValue)
 	}
 
-	// Build raw with interpolated messages for AsLdValue(). Keep all other fields from
-	// the wire response so that model.parameters.tools[] is preserved verbatim.
-	raw := parsed
-	raw.Messages = interpolatedMessages
-
 	cfg := AICompletionConfig{
 		aiConfigBase: aiConfigBase{
 			key:          key,
@@ -259,11 +242,11 @@ func (c *Client) evaluateConfig(
 			provider: ProviderConfig{Name: parsed.Provider.Name},
 			tools:    tools,
 		},
+		mode:                 parsed.Meta.Mode,
 		messages:             interpolatedMessages,
 		judgeConfiguration:   parsed.JudgeConfiguration.Clone(),
 		evaluationMetricKey:  parsed.EvaluationMetricKey,
 		evaluationMetricKeys: slices.Clone(parsed.EvaluationMetricKeys),
-		raw:                  raw,
 	}
 
 	cfg.trackerFactory = func() *Tracker {
