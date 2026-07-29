@@ -2,6 +2,7 @@ package ldai
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -110,6 +111,18 @@ func TestParseGraphFlagValue(t *testing.T) {
 	})
 }
 
+func newTestGraphDef(flag graphFlagValue, configs map[string]AIAgentConfig) AgentGraphDefinition {
+	nodes, keys := buildGraphNodes(flag, configs)
+	return AgentGraphDefinition{
+		enabled:   true,
+		flagValue: flag,
+		nodes:     nodes,
+		nodeKeys:  keys,
+		graphKey:  "g",
+		version:   flag.version,
+	}
+}
+
 func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 	// a -> b -> d
 	// a -> c -> d  (diamond)
@@ -129,13 +142,7 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 		"c": {aiConfigBase: aiConfigBase{key: "c", enabled: true}},
 		"d": {aiConfigBase: aiConfigBase{key: "d", enabled: true}},
 	}
-	def := AgentGraphDefinition{
-		enabled:   true,
-		flagValue: flag,
-		nodes:     buildGraphNodes(flag, configs),
-		graphKey:  "g",
-		version:   1,
-	}
+	def := newTestGraphDef(flag, configs)
 
 	assert.True(t, def.Enabled())
 	require.NotNil(t, def.RootNode())
@@ -144,27 +151,23 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 
 	children := def.GetChildNodes("a")
 	require.Len(t, children, 2)
-	assert.ElementsMatch(t, []string{"b", "c"}, nodeKeys(children))
+	assert.Equal(t, []string{"b", "c"}, nodeKeys(children))
 
 	parents := def.GetParentNodes("d")
-	assert.ElementsMatch(t, []string{"b", "c"}, nodeKeys(parents))
+	assert.Equal(t, []string{"b", "c"}, nodeKeys(parents))
 
 	terminals := def.TerminalNodes()
 	require.Len(t, terminals, 1)
 	assert.Equal(t, "d", terminals[0].Key())
 	assert.True(t, terminals[0].IsTerminal())
 
-	t.Run("traverse BFS visits each node once", func(t *testing.T) {
+	t.Run("traverse visits each node once in topological order", func(t *testing.T) {
 		var order []string
-		ctx := map[string]interface{}{}
 		def.Traverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
 			order = append(order, node.Key())
 			return node.Key() + "-done"
-		}, ctx)
-		assert.Equal(t, "a", order[0])
-		assert.ElementsMatch(t, []string{"a", "b", "c", "d"}, order)
-		assert.Equal(t, "a-done", ctx["a"])
-		assert.Equal(t, "d-done", ctx["d"])
+		}, nil)
+		assert.Equal(t, []string{"a", "b", "c", "d"}, order)
 		// d appears once despite diamond.
 		assert.Equal(t, 1, countKey(order, "d"))
 	})
@@ -177,7 +180,124 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 		}, nil)
 		require.NotEmpty(t, order)
 		assert.Equal(t, "a", order[len(order)-1])
-		assert.ElementsMatch(t, []string{"a", "b", "c", "d"}, order)
+		assert.Equal(t, []string{"d", "b", "c", "a"}, order)
+	})
+
+	t.Run("unequal-length convergence forward is topological", func(t *testing.T) {
+		// r -> a -> d
+		// r -> b -> c -> d
+		// Topological order visits c before d (d depends on c).
+		convFlag := graphFlagValue{
+			root:    "r",
+			enabled: true,
+			edges: map[string][]GraphEdge{
+				"r": {{key: "a"}, {key: "b"}},
+				"a": {{key: "d"}},
+				"b": {{key: "c"}},
+				"c": {{key: "d"}},
+			},
+		}
+		convConfigs := map[string]AIAgentConfig{
+			"r": {aiConfigBase: aiConfigBase{key: "r", enabled: true}},
+			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
+			"b": {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
+			"c": {aiConfigBase: aiConfigBase{key: "c", enabled: true}},
+			"d": {aiConfigBase: aiConfigBase{key: "d", enabled: true}},
+		}
+		convDef := newTestGraphDef(convFlag, convConfigs)
+
+		var order []string
+		convDef.Traverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
+			order = append(order, node.Key())
+			return nil
+		}, nil)
+		require.Equal(t, []string{"r", "a", "b", "c", "d"}, order)
+	})
+
+	t.Run("unequal-length convergence reverse is topological root-last", func(t *testing.T) {
+		convFlag := graphFlagValue{
+			root:    "r",
+			enabled: true,
+			edges: map[string][]GraphEdge{
+				"r": {{key: "a"}, {key: "b"}},
+				"a": {{key: "d"}},
+				"b": {{key: "c"}},
+				"c": {{key: "d"}},
+			},
+		}
+		convConfigs := map[string]AIAgentConfig{
+			"r": {aiConfigBase: aiConfigBase{key: "r", enabled: true}},
+			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
+			"b": {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
+			"c": {aiConfigBase: aiConfigBase{key: "c", enabled: true}},
+			"d": {aiConfigBase: aiConfigBase{key: "d", enabled: true}},
+		}
+		convDef := newTestGraphDef(convFlag, convConfigs)
+
+		var order []string
+		convDef.ReverseTraverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
+			order = append(order, node.Key())
+			return nil
+		}, nil)
+		require.Equal(t, "r", order[len(order)-1])
+		assert.ElementsMatch(t, []string{"r", "a", "b", "c", "d"}, order)
+		// Every non-root node appears before each of its parents.
+		assert.Less(t, indexOf(order, "d"), indexOf(order, "a"))
+		assert.Less(t, indexOf(order, "d"), indexOf(order, "c"))
+		assert.Less(t, indexOf(order, "c"), indexOf(order, "b"))
+		assert.Less(t, indexOf(order, "a"), indexOf(order, "r"))
+		assert.Less(t, indexOf(order, "b"), indexOf(order, "r"))
+	})
+
+	t.Run("traversal order is deterministic across runs", func(t *testing.T) {
+		// Multi-terminal, multi-parent graph:
+		// r -> a -> t1
+		// r -> b -> t2
+		// r -> c -> t1
+		detFlag := graphFlagValue{
+			root:    "r",
+			enabled: true,
+			edges: map[string][]GraphEdge{
+				"r": {{key: "a"}, {key: "b"}, {key: "c"}},
+				"a": {{key: "t1"}},
+				"b": {{key: "t2"}},
+				"c": {{key: "t1"}},
+			},
+		}
+		detConfigs := map[string]AIAgentConfig{
+			"r":  {aiConfigBase: aiConfigBase{key: "r", enabled: true}},
+			"a":  {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
+			"b":  {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
+			"c":  {aiConfigBase: aiConfigBase{key: "c", enabled: true}},
+			"t1": {aiConfigBase: aiConfigBase{key: "t1", enabled: true}},
+			"t2": {aiConfigBase: aiConfigBase{key: "t2", enabled: true}},
+		}
+		detDef := newTestGraphDef(detFlag, detConfigs)
+
+		assert.Equal(t, []string{"a", "c"}, nodeKeys(detDef.GetParentNodes("t1")))
+		assert.Equal(t, []string{"t1", "t2"}, nodeKeys(detDef.TerminalNodes()))
+
+		var expectedForward, expectedReverse []string
+		for i := 0; i < 50; i++ {
+			var forward, reverse []string
+			detDef.Traverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
+				forward = append(forward, node.Key())
+				return nil
+			}, nil)
+			detDef.ReverseTraverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
+				reverse = append(reverse, node.Key())
+				return nil
+			}, nil)
+			if i == 0 {
+				expectedForward = forward
+				expectedReverse = reverse
+			} else {
+				assert.Equal(t, expectedForward, forward)
+				assert.Equal(t, expectedReverse, reverse)
+			}
+		}
+		assert.Equal(t, []string{"r", "a", "b", "c", "t1", "t2"}, expectedForward)
+		assert.Equal(t, []string{"t1", "a", "c", "t2", "b", "r"}, expectedReverse)
 	})
 
 	t.Run("cycle safe traverse", func(t *testing.T) {
@@ -193,11 +313,7 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
 			"b": {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
 		}
-		cycleDef := AgentGraphDefinition{
-			enabled:   true,
-			flagValue: cycleFlag,
-			nodes:     buildGraphNodes(cycleFlag, cycleConfigs),
-		}
+		cycleDef := newTestGraphDef(cycleFlag, cycleConfigs)
 		var order []string
 		cycleDef.Traverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
 			order = append(order, node.Key())
@@ -206,7 +322,7 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 		assert.Equal(t, []string{"a", "b"}, order)
 	})
 
-	t.Run("reverse traverse pure cycle is a no-op", func(t *testing.T) {
+	t.Run("reverse traverse pure cycle visits all root last", func(t *testing.T) {
 		cycleFlag := graphFlagValue{
 			root:    "a",
 			enabled: true,
@@ -219,17 +335,13 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
 			"b": {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
 		}
-		cycleDef := AgentGraphDefinition{
-			enabled:   true,
-			flagValue: cycleFlag,
-			nodes:     buildGraphNodes(cycleFlag, cycleConfigs),
-		}
+		cycleDef := newTestGraphDef(cycleFlag, cycleConfigs)
 		var order []string
 		cycleDef.ReverseTraverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
 			order = append(order, node.Key())
 			return nil
 		}, nil)
-		assert.Empty(t, order)
+		assert.Equal(t, []string{"b", "a"}, order)
 	})
 
 	t.Run("reverse traverse single-node visits root", func(t *testing.T) {
@@ -241,17 +353,22 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 		singleConfigs := map[string]AIAgentConfig{
 			"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
 		}
-		singleDef := AgentGraphDefinition{
-			enabled:   true,
-			flagValue: singleFlag,
-			nodes:     buildGraphNodes(singleFlag, singleConfigs),
-		}
+		singleDef := newTestGraphDef(singleFlag, singleConfigs)
 		var order []string
 		singleDef.ReverseTraverse(func(node *AgentGraphNode, _ map[string]interface{}) interface{} {
 			order = append(order, node.Key())
 			return nil
 		}, nil)
 		assert.Equal(t, []string{"a"}, order)
+	})
+
+	t.Run("traverse does not mutate caller initialContext", func(t *testing.T) {
+		initial := map[string]interface{}{"sentinel": "keep"}
+		def.Traverse(func(node *AgentGraphNode, ctx map[string]interface{}) interface{} {
+			assert.Equal(t, "keep", ctx["sentinel"])
+			return node.Key() + "-done"
+		}, initial)
+		assert.Equal(t, map[string]interface{}{"sentinel": "keep"}, initial)
 	})
 
 	t.Run("disabled graph traversals are no-ops", func(t *testing.T) {
@@ -269,6 +386,213 @@ func TestAgentGraphDefinitionAccessorsAndTraverse(t *testing.T) {
 		}, nil)
 		assert.False(t, called)
 	})
+}
+
+func TestAgentGraphCanonicalTraversalVectors(t *testing.T) {
+	type vector struct {
+		id              string
+		root            string
+		edges           map[string][]GraphEdge
+		forward         []string
+		reverse         []string
+		forwardContext  map[string][]string
+		reverseContext  map[string][]string
+	}
+
+	// Shared context sets for G2 / G2b (only visit order differs).
+	g2ForwardCtx := map[string][]string{
+		"a": {},
+		"b": {"a"},
+		"c": {"a"},
+		"d": {"a", "c"},
+		"e": {"a", "b", "c", "d"},
+	}
+	g2ReverseCtx := map[string][]string{
+		"e": {},
+		"b": {"e"},
+		"d": {"e"},
+		"c": {"d", "e"},
+		"a": {"b", "c", "d", "e"},
+	}
+
+	vectors := []vector{
+		{
+			id:      "G1",
+			root:    "a",
+			edges:   map[string][]GraphEdge{"a": {{key: "b"}}, "b": {{key: "c"}}},
+			forward: []string{"a", "b", "c"},
+			reverse: []string{"c", "b", "a"},
+			forwardContext: map[string][]string{
+				"a": {},
+				"b": {"a"},
+				"c": {"a", "b"},
+			},
+			reverseContext: map[string][]string{
+				"c": {},
+				"b": {"c"},
+				"a": {"b", "c"},
+			},
+		},
+		{
+			id: "G2",
+			root: "a",
+			edges: map[string][]GraphEdge{
+				"a": {{key: "b"}, {key: "c"}},
+				"c": {{key: "d"}},
+				"d": {{key: "e"}},
+				"b": {{key: "e"}},
+			},
+			forward:        []string{"a", "b", "c", "d", "e"},
+			reverse:        []string{"e", "b", "d", "c", "a"},
+			forwardContext: g2ForwardCtx,
+			reverseContext: g2ReverseCtx,
+		},
+		{
+			id: "G2b",
+			root: "a",
+			edges: map[string][]GraphEdge{
+				"a": {{key: "c"}, {key: "b"}},
+				"c": {{key: "d"}},
+				"d": {{key: "e"}},
+				"b": {{key: "e"}},
+			},
+			forward:        []string{"a", "c", "b", "d", "e"},
+			reverse:        []string{"e", "b", "d", "c", "a"},
+			forwardContext: g2ForwardCtx,
+			reverseContext: g2ReverseCtx,
+		},
+		{
+			id: "G3",
+			root: "a",
+			edges: map[string][]GraphEdge{
+				"a": {{key: "b"}, {key: "c"}},
+				"b": {{key: "d"}},
+				"c": {{key: "d"}},
+			},
+			forward: []string{"a", "b", "c", "d"},
+			reverse: []string{"d", "b", "c", "a"},
+			forwardContext: map[string][]string{
+				"a": {},
+				"b": {"a"},
+				"c": {"a"},
+				"d": {"a", "b", "c"},
+			},
+			reverseContext: map[string][]string{
+				"d": {},
+				"b": {"d"},
+				"c": {"d"},
+				"a": {"b", "c", "d"},
+			},
+		},
+		{
+			id: "G4",
+			root: "a",
+			edges: map[string][]GraphEdge{
+				"a": {{key: "n"}},
+				"n": {{key: "m"}, {key: "t"}},
+				"m": {{key: "t"}},
+			},
+			forward: []string{"a", "n", "m", "t"},
+			reverse: []string{"t", "m", "n", "a"},
+			forwardContext: map[string][]string{
+				"a": {},
+				"n": {"a"},
+				"m": {"a", "n"},
+				"t": {"a", "m", "n"},
+			},
+			reverseContext: map[string][]string{
+				"t": {},
+				"m": {"t"},
+				"n": {"m", "t"},
+				"a": {"m", "n", "t"},
+			},
+		},
+		{
+			id: "G5",
+			root: "a",
+			edges: map[string][]GraphEdge{
+				"a": {{key: "b"}, {key: "c"}},
+				"b": {{key: "d"}},
+			},
+			forward: []string{"a", "b", "c", "d"},
+			reverse: []string{"c", "d", "b", "a"},
+			forwardContext: map[string][]string{
+				"a": {},
+				"b": {"a"},
+				"c": {"a"},
+				"d": {"a", "b"},
+			},
+			reverseContext: map[string][]string{
+				"c": {},
+				"d": {},
+				"b": {"d"},
+				"a": {"b", "c", "d"},
+			},
+		},
+		{
+			id: "G6",
+			root: "a",
+			edges: map[string][]GraphEdge{
+				"a": {{key: "b"}},
+				"b": {{key: "c"}},
+				"c": {{key: "b"}},
+			},
+			forward: []string{"a", "b", "c"},
+			reverse: []string{"b", "c", "a"},
+			forwardContext: map[string][]string{
+				"a": {},
+				"b": {"a"},
+				"c": {"a", "b"},
+			},
+			reverseContext: map[string][]string{
+				"b": {},
+				"c": {"b"},
+				"a": {"b", "c"},
+			},
+		},
+	}
+
+	for _, v := range vectors {
+		t.Run(v.id, func(t *testing.T) {
+			configs := make(map[string]AIAgentConfig)
+			for key := range collectAllKeys(graphFlagValue{root: v.root, edges: v.edges}) {
+				configs[key] = AIAgentConfig{aiConfigBase: aiConfigBase{key: key, enabled: true}}
+			}
+			def := newTestGraphDef(graphFlagValue{root: v.root, enabled: true, edges: v.edges}, configs)
+
+			forwardOrder, forwardCtx := captureTraversal(def.Traverse)
+			reverseOrder, reverseCtx := captureTraversal(def.ReverseTraverse)
+
+			assert.Equal(t, v.forward, forwardOrder, "forward order")
+			assert.Equal(t, v.reverse, reverseOrder, "reverse order")
+			assertScopedContexts(t, "forward", v.forwardContext, forwardCtx)
+			assertScopedContexts(t, "reverse", v.reverseContext, reverseCtx)
+		})
+	}
+}
+
+func TestAgentGraphSelfLoopExcludedFromOwnContext(t *testing.T) {
+	flag := graphFlagValue{
+		root:    "a",
+		enabled: true,
+		edges: map[string][]GraphEdge{
+			"a": {{key: "b"}},
+			"b": {{key: "b"}},
+		},
+	}
+	configs := map[string]AIAgentConfig{
+		"a": {aiConfigBase: aiConfigBase{key: "a", enabled: true}},
+		"b": {aiConfigBase: aiConfigBase{key: "b", enabled: true}},
+	}
+	def := newTestGraphDef(flag, configs)
+
+	_, forwardCtx := captureTraversal(def.Traverse)
+	_, reverseCtx := captureTraversal(def.ReverseTraverse)
+
+	assert.Equal(t, []string{"a"}, forwardCtx["b"])
+	assert.NotContains(t, forwardCtx["b"], "b")
+	assert.Equal(t, []string{}, reverseCtx["b"])
+	assert.NotContains(t, reverseCtx["b"], "b")
 }
 
 func TestAgentGraphClient(t *testing.T) {
@@ -508,4 +832,43 @@ func countKey(order []string, key string) int {
 		}
 	}
 	return n
+}
+
+func indexOf(order []string, key string) int {
+	for i, k := range order {
+		if k == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// captureTraversal runs a Traverse/ReverseTraverse method and records visit order plus
+// sorted dependency context keys (excluding any initial-context keys) per node.
+func captureTraversal(
+	run func(fn TraverseFunc, initialContext map[string]interface{}),
+) (order []string, ctxKeys map[string][]string) {
+	ctxKeys = make(map[string][]string)
+	run(func(node *AgentGraphNode, ctx map[string]interface{}) interface{} {
+		order = append(order, node.Key())
+		keys := make([]string, 0, len(ctx))
+		for k := range ctx {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		ctxKeys[node.Key()] = keys
+		return node.Key() + "-result"
+	}, nil)
+	return order, ctxKeys
+}
+
+func assertScopedContexts(t *testing.T, direction string, expected, actual map[string][]string) {
+	t.Helper()
+	for node, want := range expected {
+		got := actual[node]
+		if got == nil {
+			got = []string{}
+		}
+		assert.Equal(t, want, got, "%s context for node %q", direction, node)
+	}
 }

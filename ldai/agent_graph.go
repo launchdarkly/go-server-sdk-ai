@@ -1,6 +1,8 @@
 package ldai
 
 import (
+	"sort"
+
 	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
 )
 
@@ -52,6 +54,7 @@ type AgentGraphDefinition struct {
 	enabled        bool
 	flagValue      graphFlagValue
 	nodes          map[string]*AgentGraphNode
+	nodeKeys       []string // encounter order: root first, then BFS via edges
 	graphKey       string
 	variationKey   string
 	version        int
@@ -102,13 +105,17 @@ func (d *AgentGraphDefinition) GetChildNodes(nodeKey string) []*AgentGraphNode {
 	return children
 }
 
-// GetParentNodes returns all nodes that have an outgoing edge pointing to nodeKey.
+// GetParentNodes returns nodes with an outgoing edge to nodeKey, in graph encounter order.
 func (d *AgentGraphDefinition) GetParentNodes(nodeKey string) []*AgentGraphNode {
 	if d == nil {
 		return nil
 	}
 	var parents []*AgentGraphNode
-	for _, node := range d.nodes {
+	for _, key := range d.nodeKeys {
+		node := d.nodes[key]
+		if node == nil {
+			continue
+		}
 		for _, edge := range node.edges {
 			if edge.key == nodeKey {
 				parents = append(parents, node)
@@ -119,116 +126,226 @@ func (d *AgentGraphDefinition) GetParentNodes(nodeKey string) []*AgentGraphNode 
 	return parents
 }
 
-// TerminalNodes returns all nodes with no outgoing edges.
+// TerminalNodes returns nodes with no outgoing edges, in graph encounter order.
 func (d *AgentGraphDefinition) TerminalNodes() []*AgentGraphNode {
 	if d == nil {
 		return nil
 	}
 	var terminals []*AgentGraphNode
-	for _, node := range d.nodes {
-		if node.IsTerminal() {
+	for _, key := range d.nodeKeys {
+		node := d.nodes[key]
+		if node != nil && node.IsTerminal() {
 			terminals = append(terminals, node)
 		}
 	}
 	return terminals
 }
 
-// TraverseFunc visits a node during graph traversal. The return value is stored in the
-// context map under the node's key for use by subsequently visited nodes.
+// TraverseFunc visits a node during graph traversal. The return value is available under
+// the node's key in the scoped context of dependency-successor nodes (never written into
+// the caller's initialContext map).
 type TraverseFunc func(node *AgentGraphNode, context map[string]interface{}) interface{}
 
-// Traverse performs a breadth-first traversal starting from the root. Each node is visited
-// at most once (cycle-safe). This is a no-op when the graph is disabled or has no root.
-//
-// If initialContext is nil, a new map is created. The visitor's return value is stored under
-// the node key in the context map.
+// Traverse visits reachable nodes in dependency (topological) order starting from the root.
+// Each node is visited at most once. On cycles, the unvisited node with the lowest remaining
+// in-degree is chosen next, with ties broken by discovery order (nodeKeys). Each callback
+// receives a fresh context containing initialContext plus only that node's dependency
+// results. initialContext is never mutated. No-op when the graph has no root or fn is nil.
 func (d *AgentGraphDefinition) Traverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
 	if root == nil || fn == nil {
 		return
 	}
 
-	ctx := initialContext
-	if ctx == nil {
-		ctx = make(map[string]interface{})
+	order := d.nodeKeys
+	indeg := make(map[string]int, len(order))
+	for _, key := range order {
+		indeg[key] = 0
 	}
+	for _, key := range order {
+		for _, child := range d.GetChildNodes(key) {
+			indeg[child.key]++
+		}
+	}
+	indeg[root.key] = 0
 
-	visited := make(map[string]struct{})
-	queue := []*AgentGraphNode{root}
-	visited[root.key] = struct{}{}
+	visited := make(map[string]struct{}, len(order))
+	results := make(map[string]interface{}, len(order))
+	ancestors := make(map[string]map[string]struct{}, len(order))
 
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
-
-		result := fn(node, ctx)
-		ctx[node.key] = result
-
-		for _, child := range d.GetChildNodes(node.key) {
-			if _, seen := visited[child.key]; !seen {
-				visited[child.key] = struct{}{}
-				queue = append(queue, child)
+	for len(visited) < len(order) {
+		next := ""
+		for _, k := range order {
+			if _, seen := visited[k]; seen {
+				continue
 			}
+			if indeg[k] == 0 {
+				next = k
+				break
+			}
+		}
+		if next == "" {
+			// Cycle: pick unvisited with lowest in-degree; discovery order breaks ties.
+			lowest := -1
+			for _, k := range order {
+				if _, seen := visited[k]; seen {
+					continue
+				}
+				if lowest < 0 || indeg[k] < lowest {
+					lowest = indeg[k]
+					next = k
+				}
+			}
+		}
+		if next == "" {
+			return
+		}
+
+		visited[next] = struct{}{}
+		anc := make(map[string]struct{})
+		for _, parent := range d.GetParentNodes(next) {
+			if parent.key == next {
+				continue
+			}
+			if _, seen := visited[parent.key]; !seen {
+				continue
+			}
+			anc[parent.key] = struct{}{}
+			for k := range ancestors[parent.key] {
+				anc[k] = struct{}{}
+			}
+		}
+		ancestors[next] = anc
+
+		node := d.nodes[next]
+		results[next] = fn(node, freshContext(initialContext, results, anc))
+
+		for _, child := range d.GetChildNodes(next) {
+			indeg[child.key]--
 		}
 	}
 }
 
-// ReverseTraverse performs a reverse breadth-first traversal starting from terminal nodes
-// and working toward the root. The root node is processed last when the graph has at least
-// one terminal. Each node is visited at most once (cycle-safe). This is a no-op when the
-// graph is disabled, has no root, or has no terminal nodes (for example a pure cycle).
+// ReverseTraverse visits reachable nodes in reverse dependency order (root last).
+// Non-root nodes are released by out-degree (Kahn); on cycles among non-root nodes the
+// unvisited non-root with the lowest remaining out-degree is chosen next, with ties broken
+// by discovery order. Each callback receives a fresh context containing initialContext plus
+// only that node's descendant results. initialContext is never mutated. No-op when the
+// graph has no root or fn is nil. Pure cycles still visit every node (root last).
 func (d *AgentGraphDefinition) ReverseTraverse(fn TraverseFunc, initialContext map[string]interface{}) {
 	root := d.RootNode()
 	if root == nil || fn == nil {
 		return
 	}
 
-	ctx := initialContext
-	if ctx == nil {
-		ctx = make(map[string]interface{})
+	order := d.nodeKeys
+	outdeg := make(map[string]int, len(order))
+	for _, key := range order {
+		outdeg[key] = len(d.GetChildNodes(key))
 	}
 
-	terminals := d.TerminalNodes()
-	visited := make(map[string]struct{})
-	var queue []*AgentGraphNode
+	visited := make(map[string]struct{}, len(order))
+	results := make(map[string]interface{}, len(order))
+	descendants := make(map[string]map[string]struct{}, len(order))
 
-	// Seed from terminals, excluding root (it is processed last).
-	for _, terminal := range terminals {
-		if terminal.key == root.key {
-			continue
-		}
-		if _, seen := visited[terminal.key]; !seen {
-			visited[terminal.key] = struct{}{}
-			queue = append(queue, terminal)
+	nonRootCount := 0
+	for _, k := range order {
+		if k != root.key {
+			nonRootCount++
 		}
 	}
 
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
+	for len(visited) < nonRootCount {
+		next := ""
+		for _, k := range order {
+			if k == root.key {
+				continue
+			}
+			if _, seen := visited[k]; seen {
+				continue
+			}
+			if outdeg[k] == 0 {
+				next = k
+				break
+			}
+		}
+		if next == "" {
+			// Cycle among non-root nodes: lowest out-degree; discovery order breaks ties.
+			lowest := -1
+			for _, k := range order {
+				if k == root.key {
+					continue
+				}
+				if _, seen := visited[k]; seen {
+					continue
+				}
+				if lowest < 0 || outdeg[k] < lowest {
+					lowest = outdeg[k]
+					next = k
+				}
+			}
+		}
+		if next == "" {
+			break
+		}
 
-		result := fn(node, ctx)
-		ctx[node.key] = result
+		visited[next] = struct{}{}
+		desc := make(map[string]struct{})
+		for _, child := range d.GetChildNodes(next) {
+			if child.key == next {
+				continue
+			}
+			if _, seen := visited[child.key]; !seen {
+				continue
+			}
+			desc[child.key] = struct{}{}
+			for k := range descendants[child.key] {
+				desc[k] = struct{}{}
+			}
+		}
+		descendants[next] = desc
 
-		for _, parent := range d.GetParentNodes(node.key) {
+		node := d.nodes[next]
+		results[next] = fn(node, freshContext(initialContext, results, desc))
+
+		for _, parent := range d.GetParentNodes(next) {
 			if parent.key == root.key {
 				continue
 			}
-			if _, seen := visited[parent.key]; !seen {
-				visited[parent.key] = struct{}{}
-				queue = append(queue, parent)
-			}
+			outdeg[parent.key]--
 		}
 	}
 
-	// Process root last only when reverse traversal had a terminal to start from.
-	// A graph with no terminal nodes (for example a pure cycle) is a no-op.
-	if len(terminals) > 0 {
-		if _, seen := visited[root.key]; !seen {
-			result := fn(root, ctx)
-			ctx[root.key] = result
+	if _, seen := visited[root.key]; !seen {
+		visited[root.key] = struct{}{}
+		allNonRoot := make(map[string]struct{}, nonRootCount)
+		for _, k := range order {
+			if k != root.key {
+				allNonRoot[k] = struct{}{}
+			}
+		}
+		descendants[root.key] = allNonRoot
+		results[root.key] = fn(root, freshContext(initialContext, results, allNonRoot))
+	}
+}
+
+// freshContext returns a new map with initialContext entries plus results for keys in deps.
+// The caller's initial map is never mutated.
+func freshContext(
+	initial map[string]interface{},
+	results map[string]interface{},
+	deps map[string]struct{},
+) map[string]interface{} {
+	ctx := make(map[string]interface{}, len(initial)+len(deps))
+	for k, v := range initial {
+		ctx[k] = v
+	}
+	for k := range deps {
+		if v, ok := results[k]; ok {
+			ctx[k] = v
 		}
 	}
+	return ctx
 }
 
 func collectAllKeys(flagValue graphFlagValue) map[string]struct{} {
@@ -267,10 +384,72 @@ func collectReachableKeys(flagValue graphFlagValue) map[string]struct{} {
 	return visited
 }
 
-func buildGraphNodes(flagValue graphFlagValue, configs map[string]AIAgentConfig) map[string]*AgentGraphNode {
+// orderedNodeKeys returns keys in encounter (discovery) order: root first, then BFS via
+// declared edge order. Unreachable leftovers from allKeys are appended in sorted order so
+// discovery/tie-break never depends on Go map iteration.
+func orderedNodeKeys(flagValue graphFlagValue, allKeys map[string]struct{}) []string {
+	ordered := make([]string, 0, len(allKeys))
+	seen := make(map[string]struct{}, len(allKeys))
+
+	appendKey := func(key string) {
+		if key == "" {
+			return
+		}
+		if _, ok := allKeys[key]; !ok {
+			return
+		}
+		if _, already := seen[key]; already {
+			return
+		}
+		seen[key] = struct{}{}
+		ordered = append(ordered, key)
+	}
+
+	if flagValue.root != "" {
+		appendKey(flagValue.root)
+		queue := []string{flagValue.root}
+		for len(queue) > 0 {
+			key := queue[0]
+			queue = queue[1:]
+			for _, edge := range flagValue.edges[key] {
+				if edge.key == "" {
+					continue
+				}
+				if _, already := seen[edge.key]; already {
+					continue
+				}
+				if _, ok := allKeys[edge.key]; !ok {
+					continue
+				}
+				appendKey(edge.key)
+				queue = append(queue, edge.key)
+			}
+		}
+	}
+
+	if len(seen) < len(allKeys) {
+		leftovers := make([]string, 0, len(allKeys)-len(seen))
+		for key := range allKeys {
+			if _, already := seen[key]; !already {
+				leftovers = append(leftovers, key)
+			}
+		}
+		sort.Strings(leftovers)
+		for _, key := range leftovers {
+			appendKey(key)
+		}
+	}
+	return ordered
+}
+
+func buildGraphNodes(
+	flagValue graphFlagValue,
+	configs map[string]AIAgentConfig,
+) (map[string]*AgentGraphNode, []string) {
 	allKeys := collectAllKeys(flagValue)
+	nodeKeys := orderedNodeKeys(flagValue, allKeys)
 	nodes := make(map[string]*AgentGraphNode, len(allKeys))
-	for key := range allKeys {
+	for _, key := range nodeKeys {
 		config, ok := configs[key]
 		if !ok {
 			continue
@@ -291,7 +470,17 @@ func buildGraphNodes(flagValue graphFlagValue, configs map[string]AIAgentConfig)
 			edges:  edges,
 		}
 	}
-	return nodes
+	// Keep nodeKeys only for nodes that were actually built.
+	if len(nodes) != len(nodeKeys) {
+		filtered := make([]string, 0, len(nodes))
+		for _, key := range nodeKeys {
+			if _, ok := nodes[key]; ok {
+				filtered = append(filtered, key)
+			}
+		}
+		nodeKeys = filtered
+	}
+	return nodes, nodeKeys
 }
 
 func newDisabledAgentGraphDefinition(flagValue graphFlagValue, graphKey string) AgentGraphDefinition {
@@ -299,6 +488,7 @@ func newDisabledAgentGraphDefinition(flagValue graphFlagValue, graphKey string) 
 		enabled:      false,
 		flagValue:    flagValue,
 		nodes:        map[string]*AgentGraphNode{},
+		nodeKeys:     nil,
 		graphKey:     graphKey,
 		variationKey: flagValue.variationKey,
 		version:      flagValue.version,
