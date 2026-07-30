@@ -3,7 +3,7 @@ package datamodel
 import (
 	"slices"
 
-	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
+	"github.com/launchdarkly/go-sdk-common/v3/ldvalue"
 )
 
 // Meta defines the serialization format for config metadata.

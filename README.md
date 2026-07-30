@@ -27,7 +27,7 @@ Import the base Server SDK and this AI SDK:
 ```go
 import (
 	ld "github.com/launchdarkly/go-server-sdk/v7"
-	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
+	"github.com/launchdarkly/go-sdk-common/v3/ldcontext"
 	"github.com/launchdarkly/go-server-sdk-ai/ldai"
 )
 ```
