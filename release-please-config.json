@@ -5,7 +5,6 @@
       "bump-minor-pre-major": true,
       "versioning": "default",
       "include-component-in-tag": false,
-      "release-as": "0.10.0",
       "bootstrap-sha": "ffa81fc0368614083512057ee0393344bfc6d76d",
       "extra-files": [
         "ldai/package_info.go"
