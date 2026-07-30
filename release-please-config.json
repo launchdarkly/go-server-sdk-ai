@@ -1,0 +1,15 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "bump-minor-pre-major": true,
+      "versioning": "default",
+      "include-component-in-tag": false,
+      "release-as": "0.1.0",
+      "bootstrap-sha": "fb20df13ac91affd132ea9e7b812d2a94de598c5",
+      "extra-files": [
+        "ldai/package_info.go"
+      ]
+    }
+  }
+}
