@@ -673,7 +673,7 @@ func TestAgentGraphClient(t *testing.T) {
 		assert.True(t, found)
 	})
 
-	t.Run("blank graphKey emits usage and returns disabled", func(t *testing.T) {
+	t.Run("blank graphKey returns disabled without usage event", func(t *testing.T) {
 		sdk := newMultiFlagMockSDK(nil)
 		client, err := NewClient(sdk)
 		require.NoError(t, err)
@@ -682,16 +682,60 @@ func TestAgentGraphClient(t *testing.T) {
 		graph := client.AgentGraph("  ", ctx, nil)
 		assert.False(t, graph.Enabled())
 		assert.Nil(t, graph.RootNode())
+		assert.Nil(t, graph.CreateTracker())
 
-		var graphUsage int
 		for _, e := range sdk.events[before:] {
-			if e.eventName == usageAgentGraph {
-				graphUsage++
-				assert.Equal(t, float64(1), e.metricValue)
-				assert.Equal(t, "  ", e.data.StringValue())
-			}
+			assert.NotEqual(t, usageAgentGraph, e.eventName)
 		}
-		assert.Equal(t, 1, graphUsage)
+	})
+
+	t.Run("CreateTracker fresh runIds and works on disabled graph", func(t *testing.T) {
+		sdk := newMultiFlagMockSDK(map[string][]byte{
+			"my-graph": []byte(`{"_ldMeta":{"enabled":false},"root":"agent-a","edges":{}}`),
+			"agent-a":  agentFlagJSON("agent-a", true),
+		})
+		client, err := NewClient(sdk)
+		require.NoError(t, err)
+
+		graph := client.AgentGraph("my-graph", ctx, nil)
+		assert.False(t, graph.Enabled())
+
+		tracker1 := graph.CreateTracker()
+		tracker2 := graph.CreateTracker()
+		require.NotNil(t, tracker1)
+		require.NotNil(t, tracker2)
+		assert.NotEqual(t, tracker1.ResumptionToken(), tracker2.ResumptionToken())
+
+		before := len(sdk.events)
+		require.NoError(t, tracker1.TrackInvocationFailure())
+		require.Greater(t, len(sdk.events), before)
+		last := sdk.events[len(sdk.events)-1]
+		assert.Equal(t, graphInvocationFailure, last.eventName)
+		assert.Equal(t, "my-graph", last.data.GetByKey("graphKey").StringValue())
+	})
+
+	t.Run("CreateTracker on enabled graph", func(t *testing.T) {
+		sdk := newMultiFlagMockSDK(map[string][]byte{
+			"my-graph": []byte(`{
+				"_ldMeta": {"enabled": true, "variationKey": "gv1", "version": 2},
+				"root": "agent-a",
+				"edges": {}
+			}`),
+			"agent-a": agentFlagJSON("agent-a", true),
+		})
+		client, err := NewClient(sdk)
+		require.NoError(t, err)
+
+		graph := client.AgentGraph("my-graph", ctx, nil)
+		require.True(t, graph.Enabled())
+		tracker := graph.CreateTracker()
+		require.NotNil(t, tracker)
+
+		require.NoError(t, tracker.TrackInvocationSuccess())
+		last := sdk.events[len(sdk.events)-1]
+		assert.Equal(t, graphInvocationSuccess, last.eventName)
+		assert.Equal(t, "gv1", last.data.GetByKey("variationKey").StringValue())
+		assert.Equal(t, 2, last.data.GetByKey("version").IntValue())
 	})
 
 	validationCases := []struct {
