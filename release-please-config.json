@@ -1,0 +1,14 @@
+{
+  "bootstrap-sha": "ffa81fc0368614083512057ee0393344bfc6d76d",
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "bump-minor-pre-major": true,
+      "versioning": "default",
+      "include-component-in-tag": false,
+      "extra-files": [
+        "ldai/package_info.go"
+      ]
+    }
+  }
+}

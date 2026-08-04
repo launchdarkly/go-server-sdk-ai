@@ -3,7 +3,7 @@ package ldai
 import (
 	"maps"
 
-	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
+	"github.com/launchdarkly/go-sdk-common/v3/ldvalue"
 )
 
 // ToolConfig provides read-only access to a tool definition from the root-level tools map.

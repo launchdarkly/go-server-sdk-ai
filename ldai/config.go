@@ -1,7 +1,7 @@
 package ldai
 
 import (
-	"github.com/launchdarkly/go-sdk-common/v4/ldcontext"
+	"github.com/launchdarkly/go-sdk-common/v3/ldcontext"
 )
 
 // Config is an AI Config returned from the LaunchDarkly client.

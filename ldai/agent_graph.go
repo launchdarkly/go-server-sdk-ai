@@ -3,7 +3,7 @@ package ldai
 import (
 	"sort"
 
-	"github.com/launchdarkly/go-sdk-common/v4/ldvalue"
+	"github.com/launchdarkly/go-sdk-common/v3/ldvalue"
 )
 
 // GraphEdge is a directed edge from a source node to a target node in an agent graph.
