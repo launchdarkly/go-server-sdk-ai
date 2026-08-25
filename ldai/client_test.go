@@ -157,7 +157,8 @@ func TestExplicitVersionZeroInTracker(t *testing.T) {
 	require.Equal(t, 0, cfg.Version())
 
 	events := newMockEvents()
-	tracker := newTracker(events, newRunID(), "key", cfg.VariationKey(), cfg.Version(), ldcontext.New("user"), &cfg, nil, "")
+	tracker := newTracker(
+		events, newRunID(), "key", cfg.VariationKey(), cfg.Version(), "", 1, ldcontext.New("user"), &cfg, nil, "")
 	_ = tracker.TrackSuccess()
 
 	require.Len(t, events.events, 1)
@@ -258,6 +259,82 @@ func TestParseProviderName(t *testing.T) {
 			assert.Equal(t, test.expected, cfg.ProviderName())
 		})
 	}
+}
+
+func TestParseModelKeyAndVersion(t *testing.T) {
+	// modelKey/modelVersion are intentionally not exposed on Config (they'd read as properties of
+	// the LLM itself, e.g. a version like "5.4"); the only place they surface is the tracker's
+	// stamped event data, mirroring variationKey/version.
+	tests := []struct {
+		name            string
+		json            []byte
+		expectedKey     string
+		expectedVersion int
+	}{
+		{
+			name:            "missing",
+			json:            []byte(`{"model": {"name": "gpt-4"}}`),
+			expectedKey:     "",
+			expectedVersion: 1,
+		},
+		{
+			name:            "modelKey and modelVersion set",
+			json:            []byte(`{"model": {"name": "gpt-4"}, "_ldMeta": {"modelKey": "my-model", "modelVersion": 2}}`),
+			expectedKey:     "my-model",
+			expectedVersion: 2,
+		},
+		{
+			name:            "modelVersion only",
+			json:            []byte(`{"model": {"name": "gpt-4"}, "_ldMeta": {"modelVersion": 3}}`),
+			expectedKey:     "",
+			expectedVersion: 3,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mockSDK := newMockSDK(test.json, nil)
+			client, err := NewClient(mockSDK)
+			require.NoError(t, err)
+			require.NotNil(t, client)
+			mockSDK.events = nil
+
+			defaultVal := NewAICompletionConfigDefault().WithEnabled(true).WithMessage("hello", datamodel.User)
+			cfg := client.CompletionConfig("key", ldcontext.New("user"), defaultVal, nil)
+			tracker := cfg.CreateTracker()
+			require.NotNil(t, tracker)
+			assert.NoError(t, tracker.TrackSuccess())
+
+			require.NotEmpty(t, mockSDK.events)
+			data := mockSDK.events[len(mockSDK.events)-1].data
+			assert.Equal(t, test.expectedKey, data.GetByKey("modelKey").StringValue())
+			assert.Equal(t, test.expectedVersion, data.GetByKey("modelVersion").IntValue())
+		})
+	}
+}
+
+func TestCreateTrackerStampsModelKeyAndVersionOnTrackData(t *testing.T) {
+	configJSON := []byte(`{
+		"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 1, "modelKey": "my-model", "modelVersion": 2},
+		"model": {"name": "gpt-4"},
+		"provider": {"name": "openai"},
+		"messages": [{"content": "hello", "role": "user"}]
+	}`)
+
+	mockSDK := newMockSDK(configJSON, nil)
+	client, err := NewClient(mockSDK)
+	require.NoError(t, err)
+	mockSDK.events = nil
+
+	cfg := client.CompletionConfig("my-config", ldcontext.New("user"), Disabled(), nil)
+	tracker := cfg.CreateTracker()
+	require.NotNil(t, tracker)
+	assert.NoError(t, tracker.TrackSuccess())
+
+	require.NotEmpty(t, mockSDK.events)
+	data := mockSDK.events[len(mockSDK.events)-1].data
+	assert.Equal(t, "my-model", data.GetByKey("modelKey").StringValue())
+	assert.Equal(t, 2, data.GetByKey("modelVersion").IntValue())
 }
 
 func TestParseInvalidConfigReturnsDefault(t *testing.T) {
@@ -1185,7 +1262,10 @@ func TestCompletionConfig_DefaultPathPreservesTools(t *testing.T) {
 
 func TestClient_CreateTracker_RoundTrip(t *testing.T) {
 	configJSON := []byte(`{
-		"_ldMeta": {"variationKey": "var-1", "enabled": true, "version": 5},
+		"_ldMeta": {
+			"variationKey": "var-1", "enabled": true, "version": 5,
+			"modelKey": "my-model", "modelVersion": 2
+		},
 		"model": {"name": "gpt-4"},
 		"provider": {"name": "openai"},
 		"messages": [{"content": "hello", "role": "user"}]
@@ -1247,6 +1327,15 @@ func TestClient_CreateTracker_RoundTrip(t *testing.T) {
 	assert.Equal(t, "", feedbackEvent.data.GetByKey("modelName").StringValue())
 	assert.Equal(t, "", feedbackEvent.data.GetByKey("providerName").StringValue())
 
+	// modelKey should be absent and modelVersion should default to 1 on reconstructed tracker,
+	// since neither is included in the resumption token.
+	assert.False(t, feedbackEvent.data.GetByKey("modelKey").IsDefined())
+	assert.Equal(t, 1, feedbackEvent.data.GetByKey("modelVersion").IntValue())
+
+	// modelKey and modelVersion should be present on the original tracker's events.
+	assert.Equal(t, "my-model", successEvent.data.GetByKey("modelKey").StringValue())
+	assert.Equal(t, 2, successEvent.data.GetByKey("modelVersion").IntValue())
+
 	// SDK identification must be present on events from both trackers.
 	for _, evt := range []*mockEvent{successEvent, feedbackEvent} {
 		assert.Equal(t, SDKName, evt.data.GetByKey("aiSdkName").StringValue())
@@ -1288,7 +1377,8 @@ func TestClient_CreateTracker_InvalidToken(t *testing.T) {
 func TestClient_CreateTracker_RoundTrip_WithGraphKey(t *testing.T) {
 	events := newMockEvents()
 	config := &Config{}
-	originalTracker := newTracker(events, newRunID(), "my-config", "var-1", 5, ldcontext.New("user"), config, nil, "my-graph")
+	originalTracker := newTracker(
+		events, newRunID(), "my-config", "var-1", 5, "", 1, ldcontext.New("user"), config, nil, "my-graph")
 
 	token := originalTracker.ResumptionToken()
 	require.NotEmpty(t, token)

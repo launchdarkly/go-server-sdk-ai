@@ -198,7 +198,7 @@ func (c *Client) returnDefault(
 		judgeConfiguration: def.judgeConfiguration.Clone(),
 	}
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger, "")
+		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), "", 1, context, &cfg, c.logger, "")
 	}
 	return cfg
 }
@@ -302,8 +302,11 @@ func (c *Client) evaluateConfig(
 		evaluationMetricKeys: slices.Clone(parsed.EvaluationMetricKeys),
 	}
 
+	modelVersion := defaultVersion(parsed.Meta.ModelVersion)
+	modelKey := parsed.Meta.ModelKey
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), context, &cfg, c.logger, "")
+		return newTracker(
+			c.sdk, newRunID(), key, cfg.VariationKey(), cfg.Version(), modelKey, modelVersion, context, &cfg, c.logger, "")
 	}
 
 	return cfg
@@ -452,7 +455,7 @@ func (c *Client) returnJudgeDefault(key string, context ldcontext.Context, def A
 		evaluationMetricKey: def.evaluationMetricKey,
 	}
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
+		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, "", 1, context, &cfg, c.logger, "")
 	}
 	return cfg
 }
@@ -525,8 +528,12 @@ func (c *Client) evaluateJudgeConfig(
 		messages:            interpolated,
 		evaluationMetricKey: metricKey,
 	}
+	judgeModelVersion := defaultVersion(parsed.Meta.ModelVersion)
+	judgeModelKey := parsed.Meta.ModelKey
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, "")
+		return newTracker(
+			c.sdk, newRunID(), key, cfg.variationKey, cfg.version,
+			judgeModelKey, judgeModelVersion, context, &cfg, c.logger, "")
 	}
 	return cfg
 }
@@ -572,7 +579,8 @@ func (c *Client) returnAgentDefault(
 		judgeConfiguration: def.judgeConfiguration.Clone(),
 	}
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, graphKey)
+		return newTracker(
+			c.sdk, newRunID(), key, cfg.variationKey, cfg.version, "", 1, context, &cfg, c.logger, graphKey)
 	}
 	return cfg
 }
@@ -633,8 +641,12 @@ func (c *Client) evaluateAgentConfig(
 		instructions:       instructions,
 		judgeConfiguration: parsed.JudgeConfiguration.Clone(),
 	}
+	agentModelVersion := defaultVersion(parsed.Meta.ModelVersion)
+	agentModelKey := parsed.Meta.ModelKey
 	cfg.trackerFactory = func() *Tracker {
-		return newTracker(c.sdk, newRunID(), key, cfg.variationKey, cfg.version, context, &cfg, c.logger, graphKey)
+		return newTracker(
+			c.sdk, newRunID(), key, cfg.variationKey, cfg.version,
+			agentModelKey, agentModelVersion, context, &cfg, c.logger, graphKey)
 	}
 	return cfg
 }
