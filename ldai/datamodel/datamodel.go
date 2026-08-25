@@ -20,6 +20,12 @@ type Meta struct {
 	// Mode is the AI Config mode (e.g., "completion", "agent", "judge").
 	// A missing mode defaults to "completion".
 	Mode string `json:"mode,omitempty"`
+
+	// ModelKey is the model's stable, unique key (distinct from Model.Name, which is not guaranteed unique).
+	ModelKey string `json:"modelKey,omitempty"`
+
+	// ModelVersion is the pinned version of the model that the variation references.
+	ModelVersion *int `json:"modelVersion,omitempty"`
 }
 
 // Model defines the serialization format for a model.

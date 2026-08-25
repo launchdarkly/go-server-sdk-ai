@@ -164,6 +164,8 @@ type Tracker struct {
 	runID        string
 	variationKey string
 	version      int
+	modelKey     string
+	modelVersion int
 	graphKey     string
 	config       trackableConfig
 	context      ldcontext.Context
@@ -202,13 +204,16 @@ func newTracker(
 	key string,
 	variationKey string,
 	version int,
+	modelKey string,
+	modelVersion int,
 	ctx ldcontext.Context,
 	config trackableConfig,
 	loggers interfaces.LDLoggers,
 	graphKey string,
 ) *Tracker {
 	return newTrackerWithStopwatch(
-		events, runID, key, variationKey, version, ctx, config, loggers, &defaultStopwatch{}, graphKey,
+		events, runID, key, variationKey, version, modelKey, modelVersion,
+		ctx, config, loggers, &defaultStopwatch{}, graphKey,
 	)
 }
 
@@ -220,6 +225,8 @@ func newTrackerWithStopwatch(
 	key string,
 	variationKey string,
 	version int,
+	modelKey string,
+	modelVersion int,
 	ctx ldcontext.Context,
 	config trackableConfig,
 	loggers interfaces.LDLoggers,
@@ -236,8 +243,12 @@ func newTrackerWithStopwatch(
 		Set("version", ldvalue.Int(version)).
 		Set("providerName", ldvalue.String(config.ProviderName())).
 		Set("modelName", ldvalue.String(config.ModelName())).
+		Set("modelVersion", ldvalue.Int(modelVersion)).
 		Set("aiSdkName", ldvalue.String(SDKName)).
 		Set("aiSdkVersion", ldvalue.String(Version))
+	if modelKey != "" {
+		builder.Set("modelKey", ldvalue.String(modelKey))
+	}
 	if variationKey != "" {
 		builder.Set("variationKey", ldvalue.String(variationKey))
 	}
@@ -251,6 +262,8 @@ func newTrackerWithStopwatch(
 		runID:        runID,
 		variationKey: variationKey,
 		version:      version,
+		modelKey:     modelKey,
+		modelVersion: modelVersion,
 		graphKey:     graphKey,
 		config:       config,
 		trackData:    trackData,
@@ -267,6 +280,8 @@ func (t *Tracker) logWarning(format string, args ...interface{}) {
 }
 
 // ResumptionToken returns a URL-safe Base64-encoded token for reconstructing this Tracker.
+// The token contains the runId, configKey, variationKey, version, and graphKey. It does not
+// contain modelName, providerName, modelKey, or modelVersion.
 func (t *Tracker) ResumptionToken() string {
 	payload := resumptionPayload{
 		RunID:        t.runID,
@@ -280,7 +295,9 @@ func (t *Tracker) ResumptionToken() string {
 }
 
 // TrackerFromResumptionToken reconstructs a Tracker from a token produced by
-// Tracker.ResumptionToken, reusing the original runId.
+// Tracker.ResumptionToken, reusing the original runId. The reconstructed tracker will have
+// empty modelName, providerName, and modelKey, and modelVersion defaults to 1, since these are
+// not included in the token.
 func TrackerFromResumptionToken(token string, sdk ServerSDK, context ldcontext.Context) (*Tracker, error) {
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
@@ -298,6 +315,8 @@ func TrackerFromResumptionToken(token string, sdk ServerSDK, context ldcontext.C
 		payload.ConfigKey,
 		payload.VariationKey,
 		payload.Version,
+		"",
+		1,
 		context,
 		&emptyConfig,
 		sdk.Loggers(),
@@ -517,6 +536,10 @@ type TrackData struct {
 	ModelName string
 	// ProviderName is the provider name associated with the config.
 	ProviderName string
+	// ModelKey is the model's stable, unique key. Empty if not set.
+	ModelKey string
+	// ModelVersion is the pinned version of the model that the variation references. Defaults to 1.
+	ModelVersion int
 	// GraphKey is the graph key associated with the config. Empty if not set.
 	GraphKey string
 	// AISdkName is the name of the AI SDK.
@@ -534,6 +557,8 @@ func (t *Tracker) GetTrackData() TrackData {
 		VariationKey: t.variationKey,
 		ModelName:    t.config.ModelName(),
 		ProviderName: t.config.ProviderName(),
+		ModelKey:     t.modelKey,
+		ModelVersion: t.modelVersion,
 		GraphKey:     t.graphKey,
 		AISdkName:    SDKName,
 		AISdkVersion: Version,
