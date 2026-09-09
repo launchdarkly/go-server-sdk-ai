@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/launchdarkly/go-server-sdk-ai/compare/v0.10.0...v0.11.0) (2026-09-09)
+
+
+### Features
+
+* **ldai:** stamp modelKey and modelVersion on AI usage events (AIC-2850) ([#17](https://github.com/launchdarkly/go-server-sdk-ai/issues/17)) ([fb76240](https://github.com/launchdarkly/go-server-sdk-ai/commit/fb7624024189b2e1f455e4ca0bbb913b9cff9517))
+
 ## 0.10.0 (2026-08-04)
 
 
