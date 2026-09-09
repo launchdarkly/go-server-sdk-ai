@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0](https://github.com/launchdarkly/go-server-sdk-ai/compare/v0.9.3...v0.10.0) (2026-08-04)
+## 0.10.0 (2026-08-04)
 
 
 ### Features
