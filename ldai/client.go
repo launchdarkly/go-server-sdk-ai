@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -370,7 +371,54 @@ func interpolateTemplate(template string, variables map[string]interface{}) (str
 	if err := m.ParseString(disableHTMLEscaping(template)); err != nil {
 		return "", err
 	}
-	return m.RenderString(variables)
+	return m.RenderString(dropNilValues(variables))
+}
+
+// dropNilValues returns a copy of variables without nil interface or nil pointer values, recursing
+// into nested maps and slices. The mustache library panics when it evaluates such values; dropping
+// them makes a nil variable render exactly like a missing one. Nil slice elements become "" so
+// that sections still iterate over them.
+func dropNilValues(variables map[string]interface{}) map[string]interface{} {
+	if variables == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(variables))
+	for k, v := range variables {
+		if !isNilValue(v) {
+			out[k] = dropNilValuesIn(v)
+		}
+	}
+	return out
+}
+
+func dropNilValuesIn(v interface{}) interface{} {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		return dropNilValues(typed)
+	case []interface{}:
+		if typed == nil {
+			return typed
+		}
+		out := make([]interface{}, len(typed))
+		for i, elem := range typed {
+			if isNilValue(elem) {
+				out[i] = ""
+			} else {
+				out[i] = dropNilValuesIn(elem)
+			}
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func isNilValue(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
 }
 
 // resolveTools determines the tools map to expose on the config.
