@@ -766,6 +766,90 @@ func TestInterpolation(t *testing.T) {
 	})
 }
 
+func TestInterpolationNilVariables(t *testing.T) {
+	var nilString *string
+	cases := []struct {
+		name     string
+		template string
+		vars     map[string]interface{}
+		expected string
+	}{
+		{"nil value", "Hello ({{name}})", map[string]interface{}{"name": nil}, "Hello ()"},
+		{"nil pointer", "Hello ({{name}})", map[string]interface{}{"name": nilString}, "Hello ()"},
+		{"nil triple mustache", "Hello ({{{name}}})", map[string]interface{}{"name": nil}, "Hello ()"},
+		{"nil nested value", "({{user.name}})", map[string]interface{}{
+			"user": map[string]interface{}{"name": nil},
+		}, "()"},
+		{"nil parent of nested value", "({{user.name}})", map[string]interface{}{"user": nil}, "()"},
+		{"nil section", "{{#name}}yes{{/name}}{{^name}}no{{/name}}", map[string]interface{}{"name": nil}, "no"},
+		{"nil slice element", "{{#items}}[{{.}}]{{/items}}", map[string]interface{}{
+			"items": []interface{}{nil, "a"},
+		}, "[][a]"},
+		{"nil field in slice element", "{{#items}}[{{name}}]{{/items}}", map[string]interface{}{
+			"items": []interface{}{map[string]interface{}{"name": nil}, map[string]interface{}{"name": "a"}},
+		}, "[][a]"},
+		{"nil sibling does not affect other values", "{{a}}-({{b}})", map[string]interface{}{
+			"a": "x", "b": nil,
+		}, "x-()"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var result string
+			var err error
+			require.NotPanics(t, func() { result, err = interpolateTemplate(c.template, c.vars) })
+			require.NoError(t, err)
+			assert.Equal(t, c.expected, result)
+		})
+	}
+
+	t.Run("nil matches missing", func(t *testing.T) {
+		withNil, err := interpolateTemplate("a{{x}}b{{#x}}s{{/x}}{{^x}}i{{/x}}", map[string]interface{}{"x": nil})
+		require.NoError(t, err)
+		missing, err := interpolateTemplate("a{{x}}b{{#x}}s{{/x}}{{^x}}i{{/x}}", map[string]interface{}{})
+		require.NoError(t, err)
+		assert.Equal(t, missing, withNil)
+	})
+
+	t.Run("zero values still render", func(t *testing.T) {
+		vars := map[string]interface{}{"n": 0, "flag": false, "e": ""}
+		result, err := interpolateTemplate("n={{n}} flag={{flag}} e=({{e}}) {{^n}}falsy{{/n}}", vars)
+		require.NoError(t, err)
+		assert.Equal(t, "n=0 flag=false e=() falsy", result)
+	})
+
+	t.Run("caller variables are not mutated", func(t *testing.T) {
+		nested := map[string]interface{}{"name": nil}
+		vars := map[string]interface{}{"name": nil, "user": nested}
+		_, err := interpolateTemplate("{{name}}{{user.name}}", vars)
+		require.NoError(t, err)
+		assert.Contains(t, vars, "name")
+		assert.Contains(t, nested, "name")
+	})
+
+	t.Run("CompletionConfig with nil variable", func(t *testing.T) {
+		var result string
+		var err error
+		require.NotPanics(t, func() {
+			result, err = eval(t, "Hello ({{ name }})", ldcontext.New("user"), map[string]interface{}{"name": nil})
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "Hello ()", result)
+	})
+
+	t.Run("CompletionConfig with null context attribute", func(t *testing.T) {
+		ctx := ldcontext.NewBuilder("user").
+			SetValue("profile", ldvalue.ObjectBuild().Set("nickname", ldvalue.Null()).Build()).Build()
+		var result string
+		var err error
+		require.NotPanics(t, func() {
+			result, err = eval(t, "Nickname ({{ ldctx.profile.nickname }})", ctx, nil)
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "Nickname ()", result)
+	})
+}
+
 func TestModeFromMetadata(t *testing.T) {
 	// Mode carried only in _ldMeta (no root-level "mode" key) must be returned by Mode().
 	raw := []byte(`{"_ldMeta": {"variationKey": "v1", "enabled": true, "mode": "completion"}}`)
